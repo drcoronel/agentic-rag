@@ -187,37 +187,37 @@ def doctor(ctx, fix=False, quiet=False):
 
     issue([r for r in ctx["roots"] if not Path(r).is_dir()],
           "roots that no longer exist on disk",
-          "rag.py index -p <project> <the roots you still have>")
+          "rag index -p <project> <the roots you still have>")
     issue(untracked, "collections in Qdrant that no project tracks",
-          "rag.py doctor --fix  (deletes them — all of it is reindexable from disk)")
+          "rag doctor --fix  (deletes them — all of it is reindexable from disk)")
     issue(vanished, "collections in the state file but missing from Qdrant",
-          "rag.py doctor --fix  (drops the entries; the next sync rebuilds them)")
+          "rag doctor --fix  (drops the entries; the next sync rebuilds them)")
     issue(orphaned, "collections pointing at a project that no longer exists",
-          "rag.py forget <project>, or rag.py doctor --fix")
+          "rag forget <project>, or rag doctor --fix")
     issue(set(ctx["repos"]) - set(tracked), "repositories on disk that were never indexed",
-          "rag.py index")
+          "rag index")
     issue([n for n in sorted(set(tracked) & live) if not is_hybrid(n)],
           "collections with the wrong vector schema or dimension",
-          "rag.py index  (ensure() rebuilds them)")
+          "rag index  (ensure() rebuilds them)")
     issue(set(ctx["repos"]) - set(st["desc"]), "repositories with no catalogue description",
-          "rag.py describe")
+          "rag describe")
     inc = st.get("include", {})
     claims = Counter(n for p, roots in st["projects"].items() for n in discover(roots, inc.get(p)))
     issue([f"{n} (claimed {c}×)" for n, c in claims.items() if c > 1],
           "repositories claimed by more than one project — the filter silently drops one",
-          "narrow one project with --include, or rag.py forget <the redundant one>")
+          "narrow one project with --include, or rag forget <the redundant one>")
     issue([p for p, roots in st["projects"].items() if not discover(roots, inc.get(p))],
           "projects that resolve to no repositories",
-          "rag.py index -p <name> <dirs>, or rag.py forget <name>")
+          "rag index -p <name> <dirs>, or rag forget <name>")
     issue([f"{p}: {', '.join(g)}" for p, g in inc.items() if p not in st["projects"]],
-          "include globs left behind by a removed project", "rag.py doctor --fix")
+          "include globs left behind by a removed project", "rag doctor --fix")
     # Compared by cache key, not node set: an edit that leaves the collections unchanged
     # still invalidates the graph, and the node set alone cannot see that.
     key = cache_key(ctx)
     issue([] if g and g.get("key") == key
           else ["(never built)"] if not g else sorted(set(ctx["repos"]) ^ set(g["nodes"]))
           or [f"index moved on (revision {key['revision']})"],
-          "topology graph missing or out of date", "rag.py graph")
+          "topology graph missing or out of date", "rag graph")
 
     if not quiet:
         if not found:
@@ -244,7 +244,7 @@ def doctor(ctx, fix=False, quiet=False):
                 st["desc"].pop(n, None)
             drop_caches(st)            # node set changed, so every edge is suspect
             save_state(st)
-        print("\nrerun `rag.py doctor` to confirm, then `rag.py graph`", file=sys.stderr)
+        print("\nrerun `rag doctor` to confirm, then `rag graph`", file=sys.stderr)
     return len(found)
 
 

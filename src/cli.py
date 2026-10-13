@@ -4,10 +4,10 @@ One Qdrant collection per repository, each with a generated description so the
 agent can pick which repos to search before it searches them. Repositories are
 grouped into named *projects* (one root set each) so a session can scope to one.
 
-  uv run rag.py index -p work ~/repos ~/notes
-  uv run rag.py watch          # keeps the index in sync with the files
-  uv run rag.py graph          # topology over the collections
-  uv run rag.py ask "how is a failed job retried?"
+  uv run rag index -p work ~/repos ~/notes
+  uv run rag watch          # keeps the index in sync with the files
+  uv run rag graph          # topology over the collections
+  uv run rag ask "how is a failed job retried?"
 """
 import argparse, subprocess, sys
 from pathlib import Path

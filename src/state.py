@@ -77,12 +77,12 @@ def context(project=None, args_roots=None, include=None):
         if clash:
             sys.exit(f"those repositories already belong to project "
                      f"{', '.join(sorted(clash))}.\nProjects must not overlap — narrow "
-                     f"with --include, or `rag.py forget {sorted(clash)[0]}` first.")
+                     f"with --include, or `rag forget {sorted(clash)[0]}` first.")
         st["projects"][me] = new
     projects = {p: rs for p, rs in st["projects"].items() if project in (None, p)}
     if not projects:
         sys.exit(f"no project {project!r} — known: {', '.join(st['projects']) or '(none)'}\n"
-                 "index one with: rag.py index -p <name> <dir> [<dir>...]")
+                 "index one with: rag index -p <name> <dir> [<dir>...]")
     save_state(st)
 
     ctx = {"projects": projects, "include": inc, "desc": st["desc"],
@@ -160,7 +160,7 @@ def describe(ctx, force=False):
             try:
                 desc[name] = chat([{"role": "user", "content": prompt}])["content"].strip().replace("\n", " ")
             except Exception as e:               # never let a model hiccup kill `watch`
-                print(f"  {name}: describe failed ({e}) — rerun `rag.py describe`", file=sys.stderr)
+                print(f"  {name}: describe failed ({e}) — rerun `rag describe`", file=sys.stderr)
                 continue
         print(f"  {name}: {desc[name]}", file=sys.stderr)
     save_state(st)

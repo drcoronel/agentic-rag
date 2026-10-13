@@ -9,7 +9,7 @@ The same index and the same tool surface, three ways to drive it:
 
 | # | shape | agent | index | status |
 |---|---|---|---|---|
-| 1 | **Fully local** | `qwen2.5:14b` via Ollama, `rag.py ask` | Qdrant in Docker | working |
+| 1 | **Fully local** | `qwen2.5:14b` via Ollama, `rag ask` | Qdrant in Docker | working |
 | 2 | **Hosted in GCP** | Antigravity | Vertex embeddings, managed Qdrant, MCP on Cloud Run | config path in place, not deployed |
 | 3 | **Local index, Antigravity harness** | Antigravity | Qdrant in Docker, local MCP server over stdio | working |
 
@@ -35,7 +35,7 @@ What is genuinely *not* built: the hosting project, the
 Cloud Run service and IAP, and a shared index that isn't one person's laptop. The `ask`
 path still needs Ollama for the chat model; the MCP path does not.
 
-Shapes 2 and 3 share one surface: `rag.py mcp`. It exposes exactly two tools —
+Shapes 2 and 3 share one surface: `rag mcp`. It exposes exactly two tools —
 `collections` and `search` — because the harness already has better `grep` and file
 reading than we would ship. Semantic search over the index is the only thing it can't do
 itself. `search` deliberately returns more than it ranks confidently: full text for the
@@ -47,7 +47,7 @@ better relevance judge than anything that runs locally (measured, see *Retrieval
 Start the server — one process serves the tools *and* keeps the index synced:
 
 ```bash
-uv run rag.py mcp --http --watch
+uv run rag mcp --http --watch
 ```
 
 Then register it in `~/.gemini/config/mcp_config.json`:
@@ -127,11 +127,11 @@ the project is a filter, not a separate deployment, so cross-project search stil
 when you want it:
 
 ```bash
-uv run rag.py index -p work ~/repos ~/notes
-uv run rag.py index -p side-projects ~/personal
-uv run rag.py projects                        # who is in what
-uv run rag.py index                           # no -p: sync every project
-uv run rag.py search -p work "retry policy"
+uv run rag index -p work ~/repos ~/notes
+uv run rag index -p side-projects ~/personal
+uv run rag projects                        # who is in what
+uv run rag index                           # no -p: sync every project
+uv run rag search -p work "retry policy"
 ```
 
 Re-running `index -p <name>` **replaces** that project's roots. Pruning is scoped: syncing
@@ -144,15 +144,15 @@ different projects — or repos you don't want indexed at all — narrow it with
 globs, matched against the directory name:
 
 ```bash
-uv run rag.py index -p platform ~/repos -i 'svc-*' -i 'handbook'
+uv run rag index -p platform ~/repos -i 'svc-*' -i 'handbook'
 ```
 
 The globs are stored with the project, so a `svc-something-new` cloned later is picked
 up on the next sync without touching the config. Quote them — the shell must not expand
-them first. `rag.py projects` prints the globs in effect.
+them first. `rag projects` prints the globs in effect.
 
 `--include` replaces the stored globs when given and leaves them alone when omitted, so a
-plain `rag.py index` never silently widens a project.
+plain `rag index` never silently widens a project.
 
 **Two projects must not claim the same repository.** Both would discover it, one would
 overwrite the other in the collection map, and the loser would return no results at all —
@@ -162,7 +162,7 @@ flags any that predate the check.
 
 Moving a root from one project to another costs a reindex: the old project's sync sees the
 directories gone and prunes their collections before the new project can claim them. Split
-first, then `rag.py index`.
+first, then `rag index`.
 
 ### doctor
 
@@ -170,8 +170,8 @@ The state file, Qdrant and the disk can disagree, and no normal command looks at
 — `sync` only prunes inside the projects it was asked to sync. `doctor` is that view:
 
 ```bash
-uv run rag.py doctor          # exits 1 if anything is wrong
-uv run rag.py doctor --fix    # repairs what is unambiguously safe
+uv run rag doctor          # exits 1 if anything is wrong
+uv run rag doctor --fix    # repairs what is unambiguously safe
 ```
 
 It checks for roots that no longer exist, collections in Qdrant that no project tracks,
@@ -192,10 +192,10 @@ Three units, and only the last one needs a command:
 | a file | delete it on disk — `sync`/`watch` evicts its chunks by `path` filter |
 | a repository | delete or move the directory out of the root — its whole collection is dropped on the next sync |
 | a root | `index -p <name> <the roots you want to keep>` — roots are replaced, so the omitted one's repos are pruned |
-| a whole project | `uv run rag.py forget <name>` |
+| a whole project | `uv run rag forget <name>` |
 
 ```bash
-uv run rag.py forget side-projects     # deletes its collections, descriptions and roots
+uv run rag forget side-projects     # deletes its collections, descriptions and roots
 ```
 
 Everything except `forget` is a side effect of reconciling against disk, so there is no
@@ -209,7 +209,7 @@ There is deliberately no "remove one collection": the directory is still on disk
 next sync would just rebuild it. Move the directory, or split it into its own project.
 
 `forget` also drops the stored graph — every edge touching a removed node is now wrong.
-Re-run `rag.py graph` after.
+Re-run `rag graph` after.
 
 The catalogue groups by project, and both MCP tools take an optional `project`, so an agent
 working in one context doesn't have to read past ten irrelevant repos. Existing state
@@ -222,7 +222,7 @@ collision point; namespace the slug per project if it ever bites.
 
 ## Topology
 
-`rag.py graph` builds a graph over the collections from two signals already in the index —
+`rag graph` builds a graph over the collections from two signals already in the index —
 no LLM, no second store, one scroll per collection (~30s over 33k chunks):
 
 - **mentions** (directed, exact) — chunks in A that name B. A repo's docs pointing at
@@ -233,10 +233,10 @@ no LLM, no second store, one scroll per collection (~30s over 33k chunks):
   an absolute number. It exists to break ties where no mention edge exists.
 
 ```bash
-uv run rag.py graph                  # print the edge table (cached if current)
-uv run rag.py graph --rebuild        # recompute even if the cache is current
-uv run rag.py graph --mermaid        # paste into any Markdown renderer
-uv run rag.py graph --draw --open    # interactive page, default graph.html
+uv run rag graph                  # print the edge table (cached if current)
+uv run rag graph --rebuild        # recompute even if the cache is current
+uv run rag graph --mermaid        # paste into any Markdown renderer
+uv run rag graph --draw --open    # interactive page, default graph.html
 ```
 
 `--draw` builds a NetworkX graph and renders it with [pyvis](https://pyvis.readthedocs.io)
@@ -247,14 +247,14 @@ calls, so it opens offline.
 
 ## Topics
 
-The per-repository graph can only say *which repos* reference each other. `rag.py topics`
+The per-repository graph can only say *which repos* reference each other. `rag topics`
 asks the sharper question — **what the corpus is actually about, and which subjects cut
 across repository boundaries**:
 
 ```bash
-uv run rag.py topics                 # the topic table
-uv run rag.py topics --draw --open   # render it, default topics.html
-uv run rag.py topics -p platform # topics within one project
+uv run rag topics                 # the topic table
+uv run rag topics --draw --open   # render it, default topics.html
+uv run rag topics -p platform # topics within one project
 ```
 
 The pipeline is four steps and needs no LLM:
@@ -343,7 +343,7 @@ repos use overlapping vocabulary ("project", "dataset", "access") to mean differ
 
 Descriptions are written once at index time by the chat model from each repo's
 `AGENTS.md` / `CLAUDE.md` / `README.md`, cached in `.rag.json`. Edit that file to
-hand-tune a description, or `rag.py describe --force` to regenerate.
+hand-tune a description, or `rag describe --force` to regenerate.
 
 ## Why "agentic"
 
@@ -368,26 +368,26 @@ ollama pull embeddinggemma:300m          # embeddings, 768-dim
 ollama pull qwen2.5:14b                  # reasoning + tool calling
 ```
 
-`uv` handles Python deps from the header in `rag.py` — no venv to manage.
+`uv` handles Python deps from `pyproject.toml` — no venv to manage.
 
 ## Use
 
 ```bash
-uv run rag.py index -p work ~/repos ~/notes           # roots are remembered
-uv run rag.py watch                                      # keep index synced with the files
-uv run rag.py ask "how is a failed job retried?"
-uv run rag.py collections                                # the catalogue the agent sees
-uv run rag.py projects                                   # named root sets and their repos
-uv run rag.py forget side-projects                       # drop a project and its collections
-uv run rag.py doctor                                     # state vs Qdrant vs disk
-uv run rag.py graph                                      # topology over the collections
-uv run rag.py graph --draw --open                        # interactive topology page
-uv run rag.py topics --draw --open                       # topic clusters across repos
-uv run rag.py search -c handbook "on-call rotation"      # raw retrieval, no LLM
-uv run rag.py mcp --http --watch                         # serve tools to Antigravity + stay synced
-uv run rag.py mcp                                        # same tools over stdio
-uv run rag.py selftest                                   # sync correctness check
-uv run rag.py eval -k 8 --misses                         # retrieval quality on eval.jsonl
+uv run rag index -p work ~/repos ~/notes              # roots are remembered
+uv run rag watch                                      # keep index synced with the files
+uv run rag ask "how is a failed job retried?"
+uv run rag collections                                # the catalogue the agent sees
+uv run rag projects                                   # named root sets and their repos
+uv run rag forget side-projects                       # drop a project and its collections
+uv run rag doctor                                     # state vs Qdrant vs disk
+uv run rag graph                                      # topology over the collections
+uv run rag graph --draw --open                        # interactive topology page
+uv run rag topics --draw --open                       # topic clusters across repos
+uv run rag search -c handbook "on-call rotation"      # raw retrieval, no LLM
+uv run rag mcp --http --watch                         # serve tools to Antigravity + stay synced
+uv run rag mcp                                        # same tools over stdio
+uv run rag selftest                                   # sync correctness check
+uv run rag eval -k 8 --misses                         # retrieval quality on eval.jsonl
 ```
 
 Each immediate subdirectory of a root is treated as one repository, unless the project
@@ -414,11 +414,11 @@ store to fall out of step.
 
 ## Demo script
 
-1. `uv run rag.py watch` in one terminal.
-2. `uv run rag.py collections` — show the catalogue the agent routes on.
-3. Ask something one repo answers: `uv run rag.py ask "how is authentication configured?"`
+1. `uv run rag watch` in one terminal.
+2. `uv run rag collections` — show the catalogue the agent routes on.
+3. Ask something one repo answers: `uv run rag ask "how is authentication configured?"`
    — note it searches only that collection.
-4. Ask something spanning repos: `uv run rag.py ask "which repo do I change to add a new
+4. Ask something spanning repos: `uv run rag ask "which repo do I change to add a new
    environment, and what do I add?"`
 5. Edit a doc in one of the repos — watch the terminal reindex just that file.
 6. Ask about the text you just added; the new answer comes back.
@@ -426,7 +426,7 @@ store to fall out of step.
 ## Retrieval quality
 
 `eval.jsonl` is 79 questions, each with the one file that should answer it, tagged by kind
-(conceptual / lexical / literal / mixed). `rag.py eval` reports how often that file lands in
+(conceptual / lexical / literal / mixed). `rag eval` reports how often that file lands in
 the top k, for dense, BM25 and hybrid, so a retrieval change can be judged instead of argued.
 
 At k=8 on the current index:
@@ -518,7 +518,7 @@ a new dependency or a second serving process.
   was catalogued as "guidelines for contributing" rather than the GCP platform docs, and the
   `collections` tool is read straight by the calling agent. If a description still lies,
   hand-edit `.rag.json`; `describe` only overwrites with `--force`.
-- The graph is rebuilt only when you run `rag.py graph`; `watch` does not refresh it. It
+- The graph is rebuilt only when you run `rag graph`; `watch` does not refresh it. It
   shifts slowly, so a weekly rebuild is enough.
 - `watch` reads the project list once at startup. Adding a project needs a restart
   (`launchctl kickstart -k …`) — cloning a repo into an *existing* root does not.

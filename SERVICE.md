@@ -1,6 +1,6 @@
 # Running it as an always-on local service (macOS)
 
-Shape 3 in the [README](README.md) assumes you start `rag.py mcp --http --watch` in a
+Shape 3 in the [README](README.md) assumes you start `rag mcp --http --watch` in a
 terminal and leave it there. That works until you close the window or reboot — and when
 the server is gone, the `repo-rag` tools silently don't appear in Antigravity.
 
@@ -16,7 +16,7 @@ Three layers, and only the third one is missing by default:
 |---|---|---|
 | container runtime | Colima or Docker Desktop | `brew services` / login item |
 | Qdrant | `:6333`, the vectors | `restart: unless-stopped` in `compose.yaml` — already there |
-| `rag.py mcp --http --watch` | MCP tools + index watcher | the launchd agent below |
+| `rag mcp --http --watch` | MCP tools + index watcher | the launchd agent below |
 
 Ollama is a fourth dependency but takes care of itself: the `.app` installs a login item
 (*Settings → General → Login Items*). Check it's on if the log fills with connection
@@ -57,7 +57,7 @@ cat > ~/Library/LaunchAgents/com.local.repo-rag.plist <<EOF
   <array>
     <string>$(command -v uv)</string>
     <string>run</string>
-    <string>rag.py</string>
+    <string>rag</string>
     <string>mcp</string>
     <string>--http</string>
     <string>--watch</string>
@@ -83,8 +83,8 @@ Why each key is there:
 - **Absolute path to `uv`.** launchd jobs get a bare `PATH` and do not expand `~` or
   `$HOME` inside the plist. A relative or tilde path is the single most common reason a
   job never starts.
-- **`WorkingDirectory`** so `rag.py` and `.rag.json` resolve, and so the inline script
-  header gives `uv` its dependencies.
+- **`WorkingDirectory`** so `uv` finds the project (and its `rag` console script) and so
+  `.rag.json` resolves.
 - **`KeepAlive` + `ThrottleInterval 30`.** launchd has no dependency ordering. At login
   this job wins the race against the VM, fails to reach Qdrant, exits, and is restarted
   30s later — connecting once the VM is up. **A few connection errors in the log after
@@ -127,7 +127,7 @@ quiet before asking anything.
 | uninstall | `launchctl bootout gui/$UID/com.local.repo-rag` |
 
 `kickstart -k` is the one you'll use most: it restarts in place and needs no re-bootstrap
-after you edit `rag.py`.
+after you edit the server code.
 
 ## Gotchas
 
@@ -137,7 +137,7 @@ bootstrapped, not that anything is wrong. Check before believing the error:
 Genuine causes of a failed bootstrap are a malformed plist (`plutil -lint` it) or a
 group-writable plist.
 
-**Kill any `rag.py mcp` running in a terminal before bootstrapping**, or the agent
+**Kill any `rag mcp` running in a terminal before bootstrapping**, or the agent
 crash-loops on a port it can never get.
 
 **`brew services list` lies about state.** It reported `stopped` for a colima job that

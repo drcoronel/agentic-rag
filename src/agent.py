@@ -12,7 +12,7 @@ from .text import sparse
 
 RRF_K = 60
 # BM25 contributes at a fraction of dense's weight. Measured, not guessed: at equal weight
-# it drags r@1 from 0.61 to 0.42 (`rag.py eval`), because a 20-word question matches a lot
+# it drags r@1 from 0.61 to 0.42 (`rag eval`), because a 20-word question matches a lot
 # of mid-IDF prose. At 0.2 it adds recall on exact identifiers without that cost.
 SPARSE_W = 0.2
 # Hits past `k` come back as one-line digests. Measured on `eval.jsonl`: the expected file
