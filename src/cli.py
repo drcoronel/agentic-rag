@@ -26,6 +26,7 @@ from .evaluate import evaluate
 from .graph import (build_graph, collection_graph, draw_graph, graph_mermaid, graph_table,
                     topics)
 from .selftest import selftest as run_selftest
+from .sensitive import purge, scan
 from .server import serve_mcp
 from .state import cache_key, cached, context, describe as run_describe
 from .sync import doctor as run_doctor
@@ -213,6 +214,41 @@ def mcp(
 ):
     """Serve retrieval as MCP tools for an agent harness."""
     serve_mcp(context(project), "streamable-http" if http else "stdio", port, watch_too)
+
+
+@app.command()
+def secrets(
+    project: Project = None,
+    purge_them: Annotated[bool, typer.Option(
+        "--purge", help="Delete the matching points from Qdrant now.")] = False,
+):
+    """Report indexed files that look like they hold credentials.
+
+    The denylist is applied at index time, so a normal `rag index` already evicts these
+    (they stop appearing on disk from the indexer's point of view, and sync prunes what
+    it cannot see). `--purge` deletes them immediately instead of waiting for a sync.
+    """
+    ctx = context(project)
+    found = scan(ctx, project)
+    if not found:
+        print("no indexed file matches the secret denylist")
+        raise typer.Exit(0)
+
+    chunks = sum(n for hits in found.values() for n in hits.values())
+    files = sum(len(h) for h in found.values())
+    print(f"{files} file(s), {chunks} chunk(s) in the index look sensitive:\n")
+    for name, hits in sorted(found.items()):
+        print(f"{name}:")
+        for path, n in sorted(hits.items()):
+            print(f"    {path}  ({n} chunks)")
+    if purge_them:
+        print()
+        gone = purge(found)
+        print(f"\npurged {gone} chunks. Re-run `rag index` to confirm nothing returns.")
+    else:
+        print("\nThe chunk text is stored in Qdrant, so treat these as disclosed and "
+              "rotate them.\nRun `rag secrets --purge`, or `rag index`, to remove them.")
+    raise typer.Exit(1)
 
 
 @app.command()

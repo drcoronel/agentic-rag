@@ -12,6 +12,7 @@ from qdrant_client import models as qm
 from .config import settings
 from .llm import embed
 from .qdrant import by_path, client, ensure, indexed_files, is_hybrid
+from .sensitive import is_secret
 from .state import (cache_key, describe, discover, drop_caches, load_state, rediscover,
                     save_state)
 from .text import chunk, sparse
@@ -21,10 +22,14 @@ def walk(repo_dir):
     """(path, stat) for every indexable file under a repo, skipping `settings.skip_dirs`.
 
     Matched on suffix or on exact name, since Makefile and friends carry no suffix.
+    The secret denylist is checked first and overrides both, so a `.tfvars` never
+    reaches the embedder no matter what the allowlist says.
     """
     for dirpath, dirnames, filenames in os.walk(repo_dir):
         dirnames[:] = [d for d in dirnames if d not in settings.skip_dirs]
         for fn in filenames:
+            if is_secret(fn):
+                continue
             if Path(fn).suffix.lower() not in settings.text_ext and fn not in settings.text_names:
                 continue
             p = os.path.join(dirpath, fn)

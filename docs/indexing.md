@@ -44,6 +44,58 @@ deletes-and-recreates when the sparse vector is missing or the dense dimension c
 sync refills it on the same pass. Everything in the index is rebuildable from disk, so
 dropping a collection is cheap and always the right answer to a schema mismatch.
 
+## The secret guardrail
+
+Indexing was a pure allowlist: a file was taken if its extension was in `text_ext` or
+its name in `text_names`. That meant `.env` and `private.key` were skipped only
+incidentally — nothing checked for secrets — while `terraform.tfvars`,
+`secrets.yaml`, `service-account.json` and `.npmrc` were indexed like any other file,
+with their full text stored in the chunk payload of a Qdrant that has no auth.
+
+`sensitive.is_secret()` is now a denylist over the filename, checked **before** the
+allowlist, at all three places a file can reach the model:
+
+| path | guard |
+|---|---|
+| `sync.walk()` | the file is never read, so it is never chunked or embedded |
+| `agent.t_grep()` | matching lines are dropped, with a count of what was withheld |
+| `agent.t_read_file()` | refuses by name, since it takes an arbitrary path |
+
+Grep and read_file need their own guard because they go to the filesystem directly and
+never consult the index.
+
+The list is deliberately broad. A false positive costs one unsearchable file; a false
+negative embeds a credential. `secret_allow` is checked first so committed placeholders
+(`.env.example`, `*.template`) stay indexable, and so does prose — `*.md`, `*.mdx`,
+`*.rst`, `*.txt` are exempt because the name hints (`*secret*`, `*credential*`) are
+what catch documentation *about* credentials, like a `sealedsecrets-create.md` how-to.
+Nothing is lost by that exemption: detection is filename-only, so a credential pasted
+into a Markdown file was never going to be caught either way. The hard patterns
+(`.env`, `*.key`, `.netrc`) cannot be prose, so they are unaffected.
+
+`.secrets`, `.ssh` and `.gnupg` are in `skip_dirs`, so those directories are not walked
+at all.
+
+**What this does not do.** It never looks at file *contents*. A token pasted into
+`notes.md`, or a repo that keeps credentials in a conventionally-named config file, is
+still indexed. This is a guardrail against the routine cases, not a secret scanner.
+
+### Finding what is already indexed
+
+The denylist only applies going forward. `rag secrets` scrolls the `path` payload of
+every collection and reports what is already stored:
+
+```bash
+uv run rag secrets            # report; exits 1 if anything matches
+uv run rag secrets --purge    # delete those points now
+```
+
+A plain `rag index` also evicts them, because a denied file stops appearing in `walk()`
+and `sync` prunes whatever it can no longer see — `--purge` just does it immediately.
+
+Purging removes the copy in Qdrant. It does not un-disclose anything that was already
+embedded, so rotate whatever was found.
+
 ## Repository discovery
 
 Every immediate subdirectory of every root is a repository. `include` globs match

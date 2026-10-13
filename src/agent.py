@@ -11,6 +11,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from .config import settings
 from .llm import chat, embed
 from .qdrant import client
+from .sensitive import is_secret
 from .state import scope
 from .text import sparse
 
@@ -117,23 +118,38 @@ def t_search(ctx, query, k=8, collections=None, project=None, wide=WIDE, budget=
 def t_grep(ctx, pattern, collection=None):
     """Exact search straight off disk: always fresh, and finds identifiers embeddings miss.
 
-    Uses ripgrep when it is installed, GNU grep otherwise.
+    Uses ripgrep when it is installed, GNU grep otherwise. Matches in files the secret
+    denylist covers are dropped from the output — grep reads the filesystem directly, so
+    the index guard does not cover it.
     """
     where = [ctx["repos"][collection]] if collection in ctx["repos"] else ctx["roots"]
     rg = subprocess.run(["which", "rg"], capture_output=True).returncode == 0
     cmd = (["rg", "-n", "-i", "--max-count", "5"] + [f"--glob=!{d}" for d in settings.skip_dirs] if rg
            else ["grep", "-rnIi", "--max-count=5"] + [f"--exclude-dir={d}" for d in settings.skip_dirs])
     r = subprocess.run(cmd + ["-e", pattern] + where, capture_output=True, text=True, timeout=60)
-    out = []
-    for line in r.stdout.splitlines()[:40]:
+    out, withheld = [], 0
+    for line in r.stdout.splitlines():
         f, _, rest = line.partition(":")
+        if is_secret(f):
+            withheld += 1
+            continue
+        if len(out) >= 40:
+            break
         n, _, body = rest.partition(":")
         out.append(f"{_rel(ctx, f)}:{n}: {body.strip()[:200]}")
+    if withheld:
+        out.append(f"({withheld} matches withheld from files that look like they hold secrets)")
     return "\n".join(out) or "no matches"
 
 
 def t_read_file(ctx, path, start=1, end=400):
-    """A repo-relative file, or a line range of one, with line numbers."""
+    """A repo-relative file, or a line range of one, with line numbers.
+
+    Refuses files the secret denylist covers: this tool takes an arbitrary path, so it
+    would otherwise read straight past the index guard.
+    """
+    if is_secret(path):
+        return f"refused: {Path(path).name} looks like it holds credentials"
     cands = [Path(path)] + [Path(p).parent / path for p in ctx["repos"].values()] \
             + [Path(r) / path for r in ctx["roots"]]
     f = next((c for c in cands if c.is_file()), None)

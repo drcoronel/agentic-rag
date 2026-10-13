@@ -13,6 +13,7 @@ from .agent import search_hits, t_search
 from .graph import (build_graph, collection_graph, draw_graph, graph_mermaid, tg_to_json,
                     topic_graph, topics)
 from .qdrant import client, ensure, is_hybrid
+from .sensitive import is_secret, scan
 from .state import (cache_key, cached, discover, load_state, rediscover, save_state, scope,
                     slug)
 from .sync import doctor, forget, sync
@@ -32,6 +33,15 @@ def selftest():
     assert {"non-exposed", "non", "exposed"} <= set(tokens("zoneclass: non-exposed")), "hyphen"
     assert "zoneclass" in set(tokens("zoneclass: non-exposed")), "key must survive whole"
     assert sparse("a a b").values[0] > sparse("a b").values[0], "tf must saturate upward"
+
+    # the secret denylist: a miss here writes a credential into a store with no auth
+    for f in (".env", ".env.local", "private.key", "server.pem", "id_rsa", ".npmrc",
+              "secrets.yaml", "terraform.tfvars", "prod.auto.tfvars", ".netrc", ".pgpass",
+              "service-account.json", "client_secret_123.json", "db_password.yml"):
+        assert is_secret(f), f
+    for f in (".env.example", "README.md", "main.py", "values.yaml", "Makefile",
+              "sealedsecrets-create.md", "SECRETS_HANDLING.md"):
+        assert not is_secret(f), f
 
     settings.prefix = "selftest" + uuid.uuid4().hex[:6] + "-"
     try:
@@ -70,6 +80,8 @@ def _selftest_store():
         (alpha / "a.md").write_text("# Alpha\nthe alpha document about penguins\n"
                                     "see also beta-repo for the other half\n")
         (alpha / "conf.yaml").write_text("zoneclass: non-exposed\nallowDelete: true\n")
+        (alpha / "prod.tfvars").write_text("db_password = \"hunter2\"\n")
+        (alpha / ".env").write_text("API_TOKEN=hunter2\n")
         (beta / "b.md").write_text("# Beta\nthe beta document about turbines\n")
         (delta / "d.md").write_text("# Delta\nthe delta document about accordions\n")
 
@@ -83,7 +95,9 @@ def _selftest_store():
         st["projects"] = projects
         save_state(st)
 
-        assert sync(ctx, quiet=True) == (4, 0)
+        assert sync(ctx, quiet=True) == (4, 0), "the two secret files must not be indexed"
+        assert scan(ctx) == {}, "nothing sensitive may reach the index"
+        assert "hunter2" not in t_search(ctx, "hunter2 db_password API_TOKEN")
         assert sync(ctx, quiet=True) == (0, 0), "second sync must be a no-op"
         assert all(ctx["desc"].get(n) for n in (A, B, D)), "sync must describe every collection"
 

@@ -193,6 +193,22 @@ projects, and a stale topology graph. Each finding prints the command that fixes
 dead state entries, and clearing orphans. Everything it deletes is reindexable from disk.
 It will not reindex, redescribe or rebuild the graph for you, because those cost real time.
 
+### Secrets
+
+Files that look like they carry credentials are never indexed, grepped or read — the
+denylist in `settings.secret_globs` is checked before the extension allowlist, at all
+three places a file can reach the model. `.env`, `*.key`, `*.tfvars`, `.npmrc`,
+`service-account*.json` and friends are out; `.env.example`, `*.template` and prose
+stay in.
+
+```bash
+uv run rag secrets            # what the index already holds that matches
+uv run rag secrets --purge    # drop those chunks now
+```
+
+It is a filename denylist, not a secret scanner: a token pasted into `notes.md` is
+still indexed. See [docs/indexing.md](docs/indexing.md#the-secret-guardrail).
+
 ### Removing things from the index
 
 Three units, and only the last one needs a command:

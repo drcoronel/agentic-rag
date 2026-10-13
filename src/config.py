@@ -51,10 +51,40 @@ class Settings(BaseSettings):
     skip_dirs: set[str] = {
         ".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build",
         ".next", ".nuxt", ".turbo", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-        "target", ".terraform"}
+        "target", ".terraform", ".secrets", ".gnupg", ".ssh"}
     text_names: set[str] = {
         "Makefile", "Dockerfile", "Justfile", "Procfile", "CODEOWNERS", "Caddyfile",
-        ".gitignore", ".dockerignore", ".npmrc", ".nvmrc", ".env.example"}
+        ".gitignore", ".dockerignore", ".nvmrc", ".env.example"}
+
+    secret_globs: set[str] = {
+        # environment and shell-sourced config
+        ".env", ".env.*", "*.env", ".envrc",
+        # private keys, certificates, keystores
+        "*.key", "*.pem", "*.p12", "*.pfx", "*.pkcs12", "*.jks", "*.keystore", "*.ppk",
+        "*.asc", "*.gpg", "*.kdbx", "id_rsa*", "id_dsa*", "id_ecdsa*", "id_ed25519*",
+        # anything that names itself
+        "*secret*", "*credential*", "*password*", "*passwd*", "*apikey*", "*api_key*",
+        # tool config that holds tokens
+        ".netrc", ".pgpass", ".htpasswd", ".npmrc", ".pypirc", ".dockercfg",
+        ".git-credentials", ".s3cfg", "kubeconfig", "*.kubeconfig",
+        # terraform variable files are a routine credential home
+        "*.tfvars", "*.tfvars.json",
+        # service-account key material
+        "service-account*.json", "serviceaccount*.json", "*-key.json", "*-sa.json"}
+    """Filenames never indexed, grepped or read. Broad on purpose — see
+    docs/indexing.md. A false positive loses one searchable file; a false negative
+    embeds a credential into a store with no auth in front of it."""
+
+    secret_allow: set[str] = {"*.example", "*.sample", "*.template", "*.dist",
+                              "*.example.*", "*.sample.*",
+                              "*.md", "*.mdx", "*.rst", "*.txt"}
+    """Checked first, so placeholder files and prose stay indexable.
+
+    Prose is exempt because the name hints (`*secret*`, `*credential*`) are what catch
+    documentation *about* credentials — `sealedsecrets-create.md` is a how-to, not a
+    key. Nothing is lost by exempting it: detection is filename-only, so a credential
+    pasted into a `.md` was never going to be caught either way. The hard patterns
+    (`.env`, `*.key`, `.netrc`) cannot be prose, so they are unaffected."""
     doc_files: tuple[str, ...] = ("AGENTS.md", "CLAUDE.md", "README.md")
 
     max_bytes: int = 200_000
