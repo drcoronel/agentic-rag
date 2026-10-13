@@ -8,8 +8,10 @@ dependencies = [
     "mcp>=2.3.0",
     "networkx>=3.6.1",
     "numpy>=2.4.6",
+    "pydantic-settings>=2.15.0",
     "pyvis>=0.3.2",
     "qdrant-client>=1.19.1",
+    "typer>=0.27.3",
     "watchdog>=6.0.0",
 ]
 

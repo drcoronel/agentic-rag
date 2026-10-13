@@ -1,12 +1,15 @@
-"""End-to-end self check. Needs Qdrant and Ollama up; namespaces and cleans up after itself."""
+"""End-to-end self check. Needs Qdrant and Ollama up.
+
+Every collection it creates is namespaced under a throwaway `settings.prefix`, and the
+state file is redirected to a temporary directory, so a run can neither read nor damage the real index.
+"""
 import uuid
 from pathlib import Path
 
 from qdrant_client import models as qm
 
-from . import config
+from .config import settings
 from .agent import search_hits, t_search
-from .config import DIM
 from .graph import (build_graph, collection_graph, draw_graph, graph_mermaid, tg_to_json,
                     topic_graph, topics)
 from .qdrant import client, ensure, is_hybrid
@@ -15,8 +18,9 @@ from .state import (cache_key, cached, discover, load_state, rediscover, save_st
 from .sync import doctor, forget, sync
 from .text import chunk, sparse, tokens
 
+
 def selftest():
-    # PREFIX is namespaced for the run so a failure cannot touch the real index
+    """Pure checks, then the store-backed ones under a throwaway collection prefix."""
     text = "\n".join(f"line {i} " + "x" * 40 for i in range(100))
     cs = chunk(text)
     assert cs[0][0] == 1 and cs[-1][1] == 100, cs
@@ -29,34 +33,36 @@ def selftest():
     assert "zoneclass" in set(tokens("zoneclass: non-exposed")), "key must survive whole"
     assert sparse("a a b").values[0] > sparse("a b").values[0], "tf must saturate upward"
 
-    config.PREFIX = "selftest" + uuid.uuid4().hex[:6] + "-"
+    settings.prefix = "selftest" + uuid.uuid4().hex[:6] + "-"
     try:
         _selftest_store()
     finally:
-        # Every collection this run made is PREFIX-namespaced, so sweeping the prefix
-        # cleans up whatever a failed assert skipped past. Keyed on the prefix rather
-        # than on the state file: an early failure means there is no state file yet.
+        # Sweeping the prefix cleans up whatever a failed assert skipped past. Keyed on
+        # the prefix, not the state file: an early failure means there is no state file.
         for c in client().get_collections().collections:
-            if c.name.startswith(config.PREFIX):
+            if c.name.startswith(settings.prefix):
                 client().delete_collection(c.name)
     print("selftest ok")
 
 
 def _selftest_store():
-    """The half that needs Qdrant and Ollama. Split out so selftest() can wrap it in the
-    cleanup that deletes this run's collections even when an assertion fails."""
+    """The half that needs Qdrant and Ollama.
+
+    Split out so selftest() can wrap it in the cleanup that deletes this run's
+    collections even when an assertion fails.
+    """
     import tempfile
 
 
     # a pre-hybrid collection must be rebuilt, not left to fail on every upsert
     legacy = slug("legacy-schema")
-    client().create_collection(legacy, vectors_config=qm.VectorParams(size=DIM, distance=qm.Distance.COSINE))
+    client().create_collection(legacy, vectors_config=qm.VectorParams(size=settings.dim, distance=qm.Distance.COSINE))
     ensure(legacy)
     assert is_hybrid(legacy), "ensure must migrate an old single-vector collection"
     client().delete_collection(legacy)
 
     with tempfile.TemporaryDirectory() as tmp:
-        config.STATE = Path(tmp) / "state.json"                 # never touch the real .rag.json
+        settings.state = Path(tmp) / "state.json"                 # never touch the real .rag.json
         root, root2 = Path(tmp) / "p1", Path(tmp) / "p2"
         alpha, beta, delta = root / "alpha-repo", root / "beta-repo", root2 / "delta-repo"
         for d in (alpha, beta, delta):
@@ -127,7 +133,7 @@ def _selftest_store():
             "a different -k must not be served from the cache"
         assert cached("graph", cache_key(ctx)), "graph must be cached after build_graph"
 
-        # a consistent index must be clean; PREFIX scoping keeps the real one out of view
+        # a consistent index must be clean; the prefix keeps the real one out of view
         assert doctor(ctx, quiet=True) == 0, "healthy index must report no problems"
 
         # include globs: one root, two projects, disjoint repo sets

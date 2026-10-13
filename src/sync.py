@@ -1,35 +1,48 @@
-"""Reconciling the index with disk: one-shot sync, the watch daemon, and doctor."""
+"""Reconciling the index with disk: one-shot sync, the watch daemon, and doctor.
+
+See docs/indexing.md for the three-tier change detection, the exclusive lock, the
+revision counter, and why watch never raises.
+"""
 import contextlib, fcntl, hashlib, os, sys, threading, time, uuid
 from collections import Counter
 from pathlib import Path
 
 from qdrant_client import models as qm
 
-from . import config
-from .config import DOC_PREFIX, MAX_BYTES, SKIP_DIRS, TEXT_EXT, TEXT_NAMES
+from .config import settings
 from .llm import embed
 from .qdrant import by_path, client, ensure, indexed_files, is_hybrid
 from .state import (cache_key, describe, discover, drop_caches, load_state, rediscover,
                     save_state)
 from .text import chunk, sparse
 
+
 def walk(repo_dir):
+    """(path, stat) for every indexable file under a repo, skipping `settings.skip_dirs`.
+
+    Matched on suffix or on exact name, since Makefile and friends carry no suffix.
+    """
     for dirpath, dirnames, filenames in os.walk(repo_dir):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        dirnames[:] = [d for d in dirnames if d not in settings.skip_dirs]
         for fn in filenames:
-            if Path(fn).suffix.lower() not in TEXT_EXT and fn not in TEXT_NAMES:
-                continue            # Makefile and friends carry no suffix to match on
+            if Path(fn).suffix.lower() not in settings.text_ext and fn not in settings.text_names:
+                continue
             p = os.path.join(dirpath, fn)
             try:
                 st = os.stat(p)
             except OSError:
                 continue
-            if 0 < st.st_size <= MAX_BYTES:
+            if 0 < st.st_size <= settings.max_bytes:
                 yield p, st
 
 
 def sync_repo(name, repo_dir, quiet=False):
-    """Reconcile one collection with one repo directory. Idempotent."""
+    """Reconcile one collection with one repo directory. Idempotent.
+
+    Three tiers, cheapest first: an unchanged stat skips the file, a matching hash just
+    refreshes the stored stat, and only genuinely new bytes are re-chunked and embedded.
+    Returns (files indexed, files removed).
+    """
     ensure(name)
     known = indexed_files(name)
     c = client()
@@ -39,11 +52,11 @@ def sync_repo(name, repo_dir, quiet=False):
         on_disk.add(p)
         prev = known.get(p)
         if prev and prev[1] == st.st_mtime and prev[2] == st.st_size:
-            continue                                     # fast path: stat unchanged
+            continue
         data = Path(p).read_bytes()
         h = hashlib.sha256(data).hexdigest()
         if prev and prev[0] == h:
-            touched.append((p, st))                      # rewritten, same bytes
+            touched.append((p, st))
         else:
             changed.append((p, st, h, data.decode("utf-8", "replace")))
 
@@ -57,9 +70,9 @@ def sync_repo(name, repo_dir, quiet=False):
     for n, (p, st, h, text) in enumerate(changed, 1):
         pieces = chunk(text)
         r = os.path.relpath(p, parent)
-        c.delete(name, points_selector=by_path(p))       # drop stale chunks first
+        c.delete(name, points_selector=by_path(p))
         if pieces:
-            vecs = embed([f"{r}\n{t}" for _, _, t in pieces], DOC_PREFIX)
+            vecs = embed([f"{r}\n{t}" for _, _, t in pieces], settings.doc_prefix)
             c.upsert(name, points=[
                 qm.PointStruct(
                     id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{p}:{i}")),
@@ -76,13 +89,12 @@ def sync_repo(name, repo_dir, quiet=False):
 def exclusive():
     """Advisory lock around anything that mutates collections.
 
-    The `watch` daemon and a manual `index` reconcile the same collections against
-    different snapshots of the project list. Run them at once and each prunes what the
-    other just created — the loser's upserts then 404 against a collection that no longer
-    exists. Blocking the daemon for the length of an index is the cheap half of the trade.
+    `watch` and a manual `index` reconcile the same collections against different
+    snapshots of the project list, and run concurrently each prunes what the other just
+    created. Blocking the daemon for the length of an index is the cheap half of that.
     """
-    config.STATE.parent.mkdir(parents=True, exist_ok=True)
-    with open(str(config.STATE) + ".lock", "w") as f:
+    settings.state.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(settings.state) + ".lock", "w") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         try:
             yield
@@ -91,6 +103,7 @@ def exclusive():
 
 
 def sync(ctx, quiet=False):
+    """Reconcile every collection in `ctx` with disk, under the exclusive lock."""
     with exclusive():
         return _sync(ctx, quiet)
 
@@ -98,10 +111,10 @@ def sync(ctx, quiet=False):
 def _sync(ctx, quiet=False):
     st = load_state()
     known = st["collections"]
-    # Only prune inside the projects being synced — `index -p a` must not evict project b.
+    # Pruning stays inside the projects being synced: `index -p a` must not evict b.
     mine = {n for n, p in known.items() if p in ctx["projects"]}
     for stale in mine - set(ctx["repos"]):
-        client().delete_collection(stale)                # repo directory disappeared
+        client().delete_collection(stale)
         known.pop(stale, None)
         st["desc"].pop(stale, None)
         if not quiet:
@@ -116,11 +129,9 @@ def _sync(ctx, quiet=False):
         total[1] += b
         if not quiet and (a or b):
             print(f"{name}: {a} indexed, {b} removed", file=sys.stderr)
-    describe(ctx)          # a newly cloned repo needs its catalogue entry, not just chunks
+    describe(ctx)          # a newly cloned repo needs a catalogue entry, not just chunks
     if any(total):
-        # Derived views (graph, topics) key their caches off this. Chunk counts alone
-        # would miss an edit that happens to re-chunk to the same number; sync is the only
-        # thing that touches the index, so a counter it bumps is exact and free to read.
+        # The derived views key their caches off this; see docs/indexing.md.
         st = load_state()
         st["revision"] = st.get("revision", 0) + 1
         save_state(st)
@@ -133,9 +144,9 @@ def _sync(ctx, quiet=False):
 def forget(name, quiet=False):
     """Drop a whole project: its collections, their descriptions, and its root set.
 
-    Keyed on the collection -> project map rather than on `projects`, so it also cleans
-    up after a hand-edited state file — otherwise those collections are unreachable:
-    `sync` only ever prunes inside the projects it was asked to sync.
+    Keyed on the collection -> project map rather than on `projects`, so it also reaches
+    collections stranded by a hand-edited state file. `sync` cannot: it only prunes
+    inside the projects it was asked to sync.
     """
     with exclusive():
         return _forget(name, quiet)
@@ -164,15 +175,14 @@ def _forget(name, quiet=False):
 def doctor(ctx, fix=False, quiet=False):
     """Reconcile the three places the index lives: the state file, Qdrant, and disk.
 
-    Nothing in the normal commands looks outside its own project — `sync` only prunes
-    what it was asked to sync — so drift between the three is silent by construction.
-    This is the one view that reads all of them at once. Returns the problem count.
+    Every other command stays inside its own project, so drift between the three is
+    silent by construction; this is the one view that reads all of them at once. Scoped
+    to the current settings.prefix, so another namespace is never called orphaned. Returns the
+    problem count.
     """
     st = load_state()
     tracked = st["collections"]
-    # PREFIX-scoped: with RAG_PREFIX set, another namespace's collections are not ours
-    # to call orphaned. PREFIX is "" by default, so normally this is every collection.
-    live = {c.name for c in client().get_collections().collections if c.name.startswith(config.PREFIX)}
+    live = {c.name for c in client().get_collections().collections if c.name.startswith(settings.prefix)}
 
     untracked = live - set(tracked)
     vanished = set(tracked) - live
@@ -211,8 +221,8 @@ def doctor(ctx, fix=False, quiet=False):
           "rag index -p <name> <dirs>, or rag forget <name>")
     issue([f"{p}: {', '.join(g)}" for p, g in inc.items() if p not in st["projects"]],
           "include globs left behind by a removed project", "rag doctor --fix")
-    # Compared by cache key, not node set: an edit that leaves the collections unchanged
-    # still invalidates the graph, and the node set alone cannot see that.
+    # By cache key, not node set: an edit that leaves the collections unchanged still
+    # invalidates the graph, which a node-set comparison cannot see.
     key = cache_key(ctx)
     issue([] if g and g.get("key") == key
           else ["(never built)"] if not g else sorted(set(ctx["repos"]) ^ set(g["nodes"]))
@@ -254,10 +264,9 @@ RETRY_SECS = 30
 def _try_sync(ctx, quiet=False):
     """sync(), but a failure is reported instead of raised. Returns whether it worked.
 
-    Under `mcp --watch`, watch() is a daemon thread. An unhandled exception there kills
-    the watcher while uvicorn keeps serving, so the index silently freezes at whatever it
-    last held — and the startup race against Qdrant that SERVICE.md documents hits exactly
-    this path. launchd cannot help: the process is still alive and still answering.
+    Never raising is the point: under `mcp --watch` this runs on a daemon thread, and an
+    exception there freezes the index while the server keeps answering. See the watch
+    failure modes in docs/indexing.md.
     """
     try:
         sync(ctx, quiet=quiet)
@@ -269,6 +278,11 @@ def _try_sync(ctx, quiet=False):
 
 
 def watch(ctx):
+    """Sync, then keep syncing as the files change, until interrupted.
+
+    Re-runs discovery before each sync, since a repo may have been cloned or removed
+    rather than merely edited.
+    """
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
 
@@ -277,9 +291,9 @@ def watch(ctx):
     class H(FileSystemEventHandler):
         def on_any_event(self, e):
             p = str(e.src_path)
-            if set(p.split(os.sep)) & SKIP_DIRS:
+            if set(p.split(os.sep)) & settings.skip_dirs:
                 return
-            if Path(p).suffix.lower() in TEXT_EXT or Path(p).name in TEXT_NAMES:
+            if Path(p).suffix.lower() in settings.text_ext or Path(p).name in settings.text_names:
                 dirty.set()
 
     ok = _try_sync(ctx)

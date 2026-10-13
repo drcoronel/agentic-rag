@@ -1,18 +1,23 @@
-"""MCP server — retrieval exposed to an external agent harness."""
+"""MCP server: retrieval exposed to an external agent harness.
+
+Deliberately only two tools. The harness already has better grep and read_file than we
+would ship; semantic search over the index is the thing it cannot do itself.
+"""
 import threading
 
 from .agent import catalogue, t_search
 from .sync import watch
 
-def serve_mcp(ctx, transport="stdio", port=8080, also_watch=False):
-    """Expose retrieval to an external agent harness (Antigravity, Claude Code, ...).
 
-    Deliberately only two tools: the harness already has better grep/read_file than we
-    would ship. Semantic search over the index is the thing it cannot do itself.
+def serve_mcp(ctx, transport="stdio", port=8080, also_watch=False):
+    """Serve the `collections` and `search` tools over stdio or streamable HTTP.
+
+    With `also_watch`, one process both serves and keeps the index fresh. HTTP binds
+    loopback only — these tools have no auth.
     """
     from mcp.server.mcpserver import MCPServer      # was FastMCP before mcp 2.x
 
-    if also_watch:                                  # one process: serve + keep the index fresh
+    if also_watch:
         threading.Thread(target=watch, args=(ctx,), daemon=True).start()
 
     m = MCPServer("repo-rag")
@@ -59,4 +64,4 @@ def serve_mcp(ctx, transport="stdio", port=8080, also_watch=False):
     if transport == "stdio":
         m.run()
     else:
-        m.run(transport=transport, host="127.0.0.1", port=port)   # loopback only; no auth on these tools
+        m.run(transport=transport, host="127.0.0.1", port=port)

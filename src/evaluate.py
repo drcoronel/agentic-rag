@@ -1,8 +1,13 @@
-"""Retrieval quality against a .jsonl of expected files."""
+"""Retrieval quality against a .jsonl of expected files.
+
+The point is the comparison between modes, not the absolute numbers. See
+docs/retrieval.md for what the `src` column means.
+"""
 import json, sys
 from pathlib import Path
 
 from .agent import search_hits
+
 
 def _found_rel(rel, want):
     return rel == want or rel.endswith("/" + want)
@@ -15,15 +20,12 @@ def _found(hit, want):
 def evaluate(ctx, path, k=5, modes=("dense", "sparse", "hybrid"), misses=False):
     """Rank of the expected file for each question in a .jsonl of {q, path, kind, src}.
 
-    The point is the comparison between modes, not the absolute numbers. `src` splits
-    hand-written questions from model-generated ones: a question drafted *from* the
-    answer text reuses its vocabulary, so the synthetic column reads high and is only
-    comparable with itself.
+    Prints r@1, r@k and MRR per mode, split into per-group columns wherever `kind` or
+    `src` actually varies, so a skew shows up as a split column.
     """
     cases = [json.loads(l) for l in Path(path).read_text().splitlines() if l.strip()]
     if not cases:
         sys.exit(f"no cases in {path}")
-    # (field, values) — one block of columns each, so a skew shows up as a split column
     cols = [(f, sorted({c.get(f, "all") for c in cases})) for f in ("kind", "src")]
     cols = [(f, vs) for f, vs in cols if len(vs) > 1]
     rate = lambda rs, n: sum(1 for r in rs if 0 < r <= n) / len(rs) if rs else 0.0

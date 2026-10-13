@@ -1,27 +1,28 @@
-"""Derived views over the index: the repository topology and the topic clustering."""
+"""Derived views over the index: the repository topology and the topic clustering.
+
+Both are cached in .rag.json against a key from state.cache_key. See docs/topology.md
+for the two signals, the prunings, and why the drawn page works offline.
+"""
 import math, re, sys
 from collections import Counter
 from pathlib import Path
 
-from .config import DIM
+from .config import settings
 from .qdrant import client
 from .state import cache_key, cached, scope, store
 from .text import tokens
 
+
 def build_graph(ctx, quiet=False):
-    """A graph over the collections, from two signals already present in the index:
+    """A graph over the collections, from two signals already present in the index.
 
-    - **mentions** (directed, exact): chunks in A that name B. This is the sharp edge —
-      a repo's docs pointing at another repo is a real dependency, not a guess.
-    - **affinity** (undirected): cosine between the mean dense vector of each collection.
-      Blurry by construction — a whole repo averaged to one point — so it is only ever
-      read as a ranking among a node's own neighbours, never as an absolute number.
-
-    No LLM and no second store: one scroll per collection over Qdrant.
+    Mentions are directed and exact (chunks in A that name B); affinity is the cosine
+    between collection mean vectors, and is only ever read as a ranking among a node's
+    own neighbours. No LLM and no second store: one scroll per collection.
     """
     names = sorted(ctx["repos"])
     alias = {n: {n.lower(), Path(ctx["repos"][n]).name.lower()} for n in names}
-    cent = {n: [0.0] * DIM for n in names}
+    cent = {n: [0.0] * settings.dim for n in names}
     ment = {n: Counter() for n in names}
     sizes = {}
 
@@ -72,6 +73,7 @@ def build_graph(ctx, quiet=False):
 
 
 def graph_table(g, top=25):
+    """The edge list as a text table, ranked by mentions then affinity."""
     rows = sorted(g["edges"], key=lambda e: (-sum(e["mentions"].values()), -e["sim"]))[:top]
     w = max((len(n) for n in g["nodes"]), default=10) + 2
     out = [f"{len(g['nodes'])} collections, {len(g['edges'])} pairs "
@@ -84,8 +86,8 @@ def graph_table(g, top=25):
 
 
 def graph_mermaid(g, sim_top=10):
-    """Mentions as labelled arrows; the strongest affinity pairs that have no mention
-    edge as dotted lines — otherwise the affinity half is a complete graph and unreadable."""
+    """Mentions as labelled arrows, plus the strongest mention-free affinity pairs as
+    dotted lines. The affinity half is otherwise a complete graph, and unreadable."""
     ids, out = {}, ["graph LR"]
     nid = lambda n: ids.setdefault(n, f"n{len(ids)}")
     for n, meta in g["nodes"].items():
@@ -114,9 +116,9 @@ STOP = set("the a an and or of to in for is are be it this that with as on at by
 def sample_chunks(ctx, budget=3000, project=None):
     """(vectors, texts, collections) spread evenly over the collections.
 
-    Qdrant scrolls in point-id order, and ids are uuid5 of the file path, so taking the
-    first slice of each collection is arbitrary with respect to content — good enough for
-    a shape, and far cheaper than reading every chunk back out.
+    The first slice of each collection is arbitrary with respect to content, since
+    point ids are a uuid5 of the file path — good enough for a shape, and far cheaper
+    than reading every chunk back out.
     """
     import numpy as np
     names = scope(ctx, project=project)
@@ -137,8 +139,10 @@ def sample_chunks(ctx, budget=3000, project=None):
 
 
 def label_topic(members, T, df, total, n_terms=3):
-    """Top distinctive terms for one cluster: how much more often a term appears in this
-    cluster than in the corpus. Plain tf-idf over the BM25 tokenizer already in use."""
+    """Top distinctive terms for one cluster, as plain tf-idf over the BM25 tokenizer.
+
+    Counts presence per chunk rather than repetition.
+    """
     here = Counter()
     for i in members:
         here.update(set(tokens(T[i])) - STOP)      # presence per chunk, not repetition
@@ -149,11 +153,13 @@ def label_topic(members, T, df, total, n_terms=3):
 
 
 def tg_to_json(TG):
+    """The topic graph as JSON. Exact inverse of tg_from_json; the selftest asserts it."""
     return {"nodes": [[n, d] for n, d in TG.nodes(data=True)],
             "edges": [[a, b, d["weight"]] for a, b, d in TG.edges(data=True)]}
 
 
 def tg_from_json(j):
+    """Rebuild the topic graph from its cached JSON."""
     import networkx as nx
     TG = nx.Graph()
     for n, d in j["nodes"]:
@@ -164,8 +170,11 @@ def tg_from_json(j):
 
 
 def topics(ctx, rebuild=False, quiet=False, **params):
-    """Cached topic graph. Clustering is the expensive half — a scroll of every sampled
-    chunk plus an n² similarity matrix — and it only changes when the index does."""
+    """The topic graph, from cache when the index and the knobs are unchanged.
+
+    Clustering is the expensive half: a scroll of every sampled chunk plus an n²
+    similarity matrix.
+    """
     key = cache_key(ctx, project=params.get("project"),
                     **{p: params.get(p) for p in ("k", "budget", "floor")})
     hit = None if rebuild else cached("topics", key)
@@ -180,6 +189,7 @@ def topics(ctx, rebuild=False, quiet=False, **params):
 
 
 def print_topics(TG, n_topics, cached_from=None):
+    """One line per topic: size, repo spread, label, dominant repo."""
     head = f"{TG.number_of_nodes()} topics, {TG.number_of_edges()} links"
     print(head + (f"  (cached at revision {cached_from} — --rebuild to recompute)\n"
                   if cached_from is not None else "\n"))
@@ -193,9 +203,11 @@ def topic_graph(ctx, k=8, budget=3000, floor=.55, project=None, quiet=False,
     """Cluster the chunk vectors into topics, then graph how the topics connect.
 
     Nodes are topics rather than repositories: a k-nearest-neighbour graph over sampled
-    chunk vectors, cut into communities by Louvain (NetworkX ships it, so no extra
-    dependency and no LLM). The interesting ones are the topics that span repositories —
-    those are the places the corpus is really joined, which a per-repo graph cannot show.
+    chunk vectors, cut into communities by Louvain. The interesting ones are the topics
+    that span repositories, which a per-repo graph cannot show.
+
+    Singletons and all but each topic's strongest `keep_links` edges are dropped — both
+    are there to keep the drawing readable rather than to change the clustering.
     """
     import numpy as np, networkx as nx
 
@@ -217,9 +229,6 @@ def topic_graph(ctx, k=8, budget=3000, floor=.55, project=None, quiet=False,
 
     comms = sorted(nx.community.louvain_communities(G, weight="weight", seed=0),
                    key=len, reverse=True)
-    # Singletons are chunks nothing else resembles. They carry no topic, and because they
-    # are disconnected the spring layout flings them to the corners and collapses the rest
-    # into an unreadable blob — so they are dropped, not drawn.
     dropped = sum(1 for c in comms if len(c) < min_size)
     comms = [c for c in comms if len(c) >= min_size]
     where = {i: t for t, c in enumerate(comms) for i in c}
@@ -239,8 +248,6 @@ def topic_graph(ctx, k=8, budget=3000, floor=.55, project=None, quiet=False,
         if a is not None and b is not None and a != b:
             TG.add_edge(a, b, weight=TG.get_edge_data(a, b, {}).get("weight", 0) + 1)
 
-    # Every topic links to nearly every other, so the full edge set is a hairball that no
-    # layout can spread. Keep each topic's strongest few links — the backbone, not the mesh.
     keep = {tuple(sorted((n, m))) for n in TG
             for m, _ in sorted(TG[n].items(), key=lambda kv: -kv[1]["weight"])[:keep_links]}
     TG.remove_edges_from([e for e in list(TG.edges()) if tuple(sorted(e)) not in keep])
@@ -264,11 +271,10 @@ LEGEND = """<div style="position:fixed;top:12px;left:12px;padding:10px 14px;z-in
 
 
 def draw_graph(G, path, title, label_key="label"):
-    """Interactive page via pyvis — a Python API over vis.js, so the physics, scaling and
-    hover behaviour are configured here in Python rather than in hand-written JS.
+    """One standalone HTML page via pyvis: no server, nothing installed, no network.
 
-    `cdn_resources="in_line"` inlines the library, so the file is standalone and opens
-    with no network. It is one HTML file with no server and nothing installed.
+    The library is inlined, and the regex at the end strips the Bootstrap tags pyvis
+    emits for panels this never enables — that is what makes the page work offline.
     """
     from pyvis.network import Network
 
@@ -310,8 +316,6 @@ def draw_graph(G, path, title, label_key="label"):
         f'background:{color[p]};margin:0 5px 0 10px"></span>{p}' for p in projects)
     html = path.read_text().replace(
         "</body>", LEGEND.replace("__TITLE__", title).replace("__KEYS__", keys) + "</body>")
-    # pyvis's template still pulls Bootstrap off a CDN for filter/config panels we never
-    # enable. Dropping those two tags is what makes the file genuinely offline.
     html = re.sub(r'\s*<(?:script|link)[^>]*(?:cdn\.jsdelivr|cdnjs|unpkg)[^>]*>'
                   r'(?:</script>)?', "", html)
     path.write_text(html)

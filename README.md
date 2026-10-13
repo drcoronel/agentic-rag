@@ -368,7 +368,9 @@ ollama pull embeddinggemma:300m          # embeddings, 768-dim
 ollama pull qwen2.5:14b                  # reasoning + tool calling
 ```
 
-`uv` handles Python deps from `pyproject.toml` — no venv to manage.
+`uv` handles Python deps from `pyproject.toml` — no venv to manage. The code lives in
+`src/`, the CLI is Typer, and settings are a pydantic `BaseSettings` in
+`src/config.py`. Implementation notes are in `docs/`.
 
 ## Use
 

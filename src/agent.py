@@ -1,35 +1,31 @@
-"""Retrieval: hybrid search, the tool surface, and the local-model answer loop."""
+"""Retrieval: hybrid search, the tool surface, and the local-model answer loop.
+
+The weights and cut-offs below are measured, not guessed. See docs/retrieval.md for
+what each was measured against.
+"""
 import json, os, subprocess, sys
 from pathlib import Path
 
 from qdrant_client.http.exceptions import UnexpectedResponse
 
-from .config import QUERY_PREFIX, SKIP_DIRS
+from .config import settings
 from .llm import chat, embed
 from .qdrant import client
 from .state import scope
 from .text import sparse
 
+
 RRF_K = 60
-# BM25 contributes at a fraction of dense's weight. Measured, not guessed: at equal weight
-# it drags r@1 from 0.61 to 0.42 (`rag eval`), because a 20-word question matches a lot
-# of mid-IDF prose. At 0.2 it adds recall on exact identifiers without that cost.
-SPARSE_W = 0.2
-# Hits past `k` come back as one-line digests. Measured on `eval.jsonl`: the expected file
-# is in the top 8 for 0.85 of questions but in the top 50 for 0.96 — the answer is almost
-# always retrieved, the caller just never sees it. Digests are ~90 chars each, so showing
-# rank 9-50 costs ~4k characters and lets the calling agent do its own judging. A local
-# model doing that judging instead measurably loses recall; see README.
-WIDE = 42
+SPARSE_W = 0.2           # BM25's weight relative to dense
+WIDE = 42                # hits past `k` returned as one-line digests
 FULL_CHARS = 12_000      # character budget for full chunk text; the rest digest
 
 
 def _ranked(names, q, using, depth, errs=None):
     """One modality across every collection, merged into a single ranking.
 
-    A collection that is not built yet 404s and is skipped silently. Anything else —
-    Qdrant down, a transport error — is appended to `errs`, because swallowing it makes
-    an outage read to the caller as a confident "no results".
+    A collection that is not built yet 404s and is skipped silently. Anything else is
+    appended to `errs`: swallowing an outage makes it read as a confident "no results".
     """
     hits = []
     for n in names:
@@ -49,15 +45,15 @@ def _ranked(names, q, using, depth, errs=None):
 def search_hits(ctx, query, k=8, collections=None, mode="hybrid", project=None, errs=None):
     """[(hit, collection)] best first. mode: hybrid | dense | sparse (dense/sparse for eval).
 
-    Fusion is deliberately done here and not by Qdrant: a per-collection FusionQuery hands
-    back rank-derived scores, so every collection's best hit ties at 1/(RRF_K+1) and merging
-    nine of those is a coin toss. Ranking globally per modality first keeps the comparison.
+    Fusion happens here rather than in Qdrant, which would hand back rank-derived scores
+    that tie every collection's best hit. Ranking globally per modality first keeps the
+    scores comparable across collections.
     """
     names = scope(ctx, collections, project)
-    depth = max(int(k) * 4, 32)      # candidates per collection; 20 measurably loses recall
+    depth = max(int(k) * 4, 32)      # candidates per collection
     lists = []
     if mode != "sparse":
-        lists.append(_ranked(names, embed([query], QUERY_PREFIX)[0], "dense", depth, errs))
+        lists.append(_ranked(names, embed([query], settings.query_prefix)[0], "dense", depth, errs))
     if mode != "dense":
         lists.append(_ranked(names, sparse(query, query=True), "bm25", depth, errs))
     if len(lists) == 1:
@@ -81,8 +77,8 @@ def _cite(h, n):
 def t_search(ctx, query, k=8, collections=None, project=None, wide=WIDE, budget=FULL_CHARS):
     """Full chunk text for the best hits, then every remaining hit as a one-line digest.
 
-    Nothing is ever dropped: the budget decides full-text-vs-digest, not inclusion. The
-    caller is a better relevance judge than anything local, so it gets the whole pool.
+    Nothing is ever dropped: `budget` decides full-text-versus-digest, not inclusion.
+    The caller is a better relevance judge than anything local, so it gets the pool.
     """
     names = scope(ctx, collections, project)
     if not names:
@@ -119,11 +115,14 @@ def t_search(ctx, query, k=8, collections=None, project=None, wide=WIDE, budget=
 
 
 def t_grep(ctx, pattern, collection=None):
-    """Exact search straight off disk — always fresh, and finds identifiers embeddings miss."""
+    """Exact search straight off disk: always fresh, and finds identifiers embeddings miss.
+
+    Uses ripgrep when it is installed, GNU grep otherwise.
+    """
     where = [ctx["repos"][collection]] if collection in ctx["repos"] else ctx["roots"]
     rg = subprocess.run(["which", "rg"], capture_output=True).returncode == 0
-    cmd = (["rg", "-n", "-i", "--max-count", "5"] + [f"--glob=!{d}" for d in SKIP_DIRS] if rg
-           else ["grep", "-rnIi", "--max-count=5"] + [f"--exclude-dir={d}" for d in SKIP_DIRS])
+    cmd = (["rg", "-n", "-i", "--max-count", "5"] + [f"--glob=!{d}" for d in settings.skip_dirs] if rg
+           else ["grep", "-rnIi", "--max-count=5"] + [f"--exclude-dir={d}" for d in settings.skip_dirs])
     r = subprocess.run(cmd + ["-e", pattern] + where, capture_output=True, text=True, timeout=60)
     out = []
     for line in r.stdout.splitlines()[:40]:
@@ -134,6 +133,7 @@ def t_grep(ctx, pattern, collection=None):
 
 
 def t_read_file(ctx, path, start=1, end=400):
+    """A repo-relative file, or a line range of one, with line numbers."""
     cands = [Path(path)] + [Path(p).parent / path for p in ctx["repos"].values()] \
             + [Path(r) / path for r in ctx["roots"]]
     f = next((c for c in cands if c.is_file()), None)
@@ -146,6 +146,7 @@ def t_read_file(ctx, path, start=1, end=400):
 
 
 def _rel(ctx, path):
+    """An absolute path shortened to `<repo>/<path>`, the form used in citations."""
     for d in ctx["repos"].values():
         if path.startswith(str(Path(d).parent) + os.sep):
             return os.path.relpath(path, Path(d).parent)
@@ -195,6 +196,7 @@ repositories do not contain the answer, say so plainly."""
 
 
 def catalogue(ctx, project=None):
+    """The repo catalogue the agent routes on: name, chunk count, description, related."""
     related = ctx.get("graph", {}).get("related", {})
     lines, names = [], scope(ctx, project=project)
     for p in sorted({ctx["proj"][n] for n in names}):
@@ -212,8 +214,11 @@ def catalogue(ctx, project=None):
 
 
 def clip(s, limit=12000):
-    """Truncate on a line boundary and say so — a silently chopped file makes a small model
-    try to complete the code instead of answering the question."""
+    """Truncate on a line boundary and say so, loudly.
+
+    A silently chopped file makes a small model try to *complete* the code instead of
+    answering the question.
+    """
     if len(s) <= limit:
         return s
     cut = s.rfind("\n", 0, limit) or limit
@@ -223,8 +228,11 @@ def clip(s, limit=12000):
 
 
 def ask(ctx, question, max_steps=10, verbose=True):
-    # wide=0: the digest tail is for the calling harness, which judges well. The local
-    # model measurably does not — handing it 42 extra paths just burns its context.
+    """Answer with the local model, looping over tool calls until it stops asking.
+
+    `wide=0`: the digest tail is for the calling harness, which judges it well. The
+    local model measurably does not, so the extra paths would just burn its context.
+    """
     dispatch = {"search": lambda c, **kw: t_search(c, wide=0, **kw),
                 "grep": t_grep, "read_file": t_read_file}
     msgs = [{"role": "system", "content": SYSTEM.format(catalogue=catalogue(ctx))},
