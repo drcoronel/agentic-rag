@@ -3,6 +3,16 @@
 Ask questions about your repos in natural language. Fully local: Ollama for
 embeddings and reasoning, Qdrant for vectors. The index stays in sync with the files.
 
+This file is the tour: what it does, how to drive it, and what the numbers say. The
+implementation rationale — why each knob is set where it is — lives next to the code:
+
+| | |
+|---|---|
+| [docs/indexing.md](docs/indexing.md) | settings, discovery, sync, locking, cache invalidation, `doctor`, watch failure modes |
+| [docs/retrieval.md](docs/retrieval.md) | the hand-rolled BM25, RRF fusion, the digest tail, error handling |
+| [docs/topology.md](docs/topology.md) | the two graph signals, topic clustering, the prunings, offline drawing |
+| [SERVICE.md](SERVICE.md) | running the MCP server under launchd |
+
 ## Three deployment shapes
 
 The same index and the same tool surface, three ways to drive it:
@@ -223,14 +233,11 @@ collision point; namespace the slug per project if it ever bites.
 ## Topology
 
 `rag graph` builds a graph over the collections from two signals already in the index —
-no LLM, no second store, one scroll per collection (~30s over 33k chunks):
-
-- **mentions** (directed, exact) — chunks in A that name B. A repo's docs pointing at
-  another repo is a real dependency, and this is the signal worth trusting.
-- **affinity** (undirected) — cosine between each collection's mean dense vector. A whole
-  repo averaged to one point is blurry by construction: on this corpus everything scores
-  0.58–0.93, so it is only ever read as a *ranking among one node's neighbours*, never as
-  an absolute number. It exists to break ties where no mention edge exists.
+**mentions** (chunks in A that name B, directed and exact) and **affinity** (cosine
+between collection mean vectors). No LLM, no second store, one scroll per collection
+(~30s over 33k chunks). See [docs/topology.md](docs/topology.md) for why mentions are
+the signal worth trusting and affinity is only ever read as a local ranking — on this
+corpus everything scores 0.58–0.93, so the absolute number means nothing.
 
 ```bash
 uv run rag graph                  # print the edge table (cached if current)
@@ -239,11 +246,9 @@ uv run rag graph --mermaid        # paste into any Markdown renderer
 uv run rag graph --draw --open    # interactive page, default graph.html
 ```
 
-`--draw` builds a NetworkX graph and renders it with [pyvis](https://pyvis.readthedocs.io)
-— a Python API over vis.js, so physics, scaling and hover behaviour are configured in
-Python, not hand-written JS. Node area is chunk count, colour is project, edge width is
-cross-reference count. The page inlines its own copy of vis.js and makes no network
-calls, so it opens offline.
+`--draw` renders it with [pyvis](https://pyvis.readthedocs.io): node area is chunk
+count, colour is project, edge width is cross-reference count. The page inlines vis.js
+and makes no network calls, so it opens offline. Add `--out FILE` to choose the path.
 
 ## Topics
 
@@ -254,20 +259,13 @@ across repository boundaries**:
 ```bash
 uv run rag topics                 # the topic table
 uv run rag topics --draw --open   # render it, default topics.html
-uv run rag topics -p platform # topics within one project
+uv run rag topics -p platform     # topics within one project
 ```
 
-The pipeline is four steps and needs no LLM:
-
-1. **Sample** chunk vectors evenly across collections (`--budget`, default 3000). Qdrant
-   scrolls in point-id order and ids are a uuid5 of the file path, so the slice is
-   arbitrary with respect to content.
-2. **k-nearest-neighbour graph** over cosine similarity (`-k`, default 8; `--floor`,
-   default 0.55) — one NumPy matmul, then NetworkX holds the graph.
-3. **Louvain communities** (`nx.community.louvain_communities`, seeded for determinism).
-   NetworkX ships it, so no extra dependency and no clustering library.
-4. **Label** each community by tf-idf over the BM25 tokenizer already used for retrieval:
-   the terms that are far more common inside the cluster than in the corpus.
+Four steps, no LLM: sample chunk vectors evenly across collections (`--budget`), build
+a k-nearest-neighbour graph over cosine similarity (`-k`, `--floor`), cut it into
+Louvain communities, and label each by tf-idf over the BM25 tokenizer already used for
+retrieval. [docs/topology.md](docs/topology.md) has the details.
 
 Topic nodes are sized by how many sampled chunks they hold, coloured by the project that
 dominates them, and **ringed and larger-labelled when they span more than one
@@ -279,12 +277,9 @@ per-repository breakdown.
 > that last one only imports on Python ≤3.8. It also ships no plotting module. The other
 > ReGraph is Cambridge Intelligence's React SDK, which is commercially licensed.
 
-Two things keep the picture legible, both measured rather than guessed. Communities
-below `min_size` (3) are dropped: they are chunks nothing else resembles, they carry no
-topic, and being disconnected they drag the spring layout apart and collapse everything
-else into a blob. And each topic keeps only its 3 strongest links — at this `--floor`
-nearly every topic touches every other, so the full edge set is a mesh no layout can
-spread.
+Two prunings keep the picture legible: communities below `min_size` (3) are dropped,
+and each topic keeps only its 3 strongest links. Both exist for the drawing, not the
+clustering — see [docs/topology.md](docs/topology.md).
 
 ### Caching
 
@@ -296,25 +291,16 @@ change. Nothing to remember and no flag to pass — a stale answer is never serv
 | `graph` | 47s | 0.6s |
 | `topics` | 4.7s | 0.7s |
 
-A cache entry records the key it was computed from:
-
-- **`revision`** — a counter `sync` bumps whenever it actually indexed or removed
-  something. Chunk counts alone would miss an edit that re-chunks to the same number;
-  `sync` is the only thing that touches the index, so a counter it bumps is both exact
-  and free to read.
-- **scope** — the collections in play, so cloning a repo or adding a project invalidates.
-- **parameters** — `-k`, `--budget`, `--floor`, so a `-k 12` run is never served from a
-  `-k 8` cache. Each parameter set occupies the one slot; alternating between two
-  recomputes each time.
-
-`forget` and `doctor --fix` drop both caches outright, since collections disappearing
-underneath them makes every edge suspect. `--rebuild` forces recomputation; `doctor`
-reports a stale graph by comparing the same key, so it catches content changes and not
-just added or removed collections.
+A cache entry records the key it was computed from: the index `revision`, the
+collections in scope, and the view's own parameters — so a `-k 12` run is never served
+from a `-k 8` cache. Each parameter set occupies the one slot, so alternating between
+two recomputes each time. `--rebuild` forces it. `forget` and `doctor --fix` drop both
+caches outright. [docs/indexing.md](docs/indexing.md#the-revision-counter) covers what
+`revision` catches that a chunk count would not.
 
 Expect some topics to be build artefacts rather than subjects — `sha512 / integrity /
 tgz` is a lockfile, `c22 / c27 / c25` is minified CSS. They are honestly in the index,
-so they are honestly in the graph; narrow `TEXT_EXT` if they bother you.
+so they are honestly in the graph; narrow `text_ext` in the settings if they bother you.
 
 The payoff isn't the picture. The top four neighbours per collection land in the catalogue
 as `· related: …`, which the agent reads in its system prompt — so when one repo
@@ -369,8 +355,8 @@ ollama pull qwen2.5:14b                  # reasoning + tool calling
 ```
 
 `uv` handles Python deps from `pyproject.toml` — no venv to manage. The code lives in
-`src/`, the CLI is Typer, and settings are a pydantic `BaseSettings` in
-`src/config.py`. Implementation notes are in `docs/`.
+`src/`, the CLI is Typer, and every setting is a field on the pydantic `BaseSettings` in
+`src/config.py` — so `rag <command> --help` and that one file are the whole surface.
 
 ## Use
 
@@ -397,14 +383,11 @@ narrows that with `--include` globs.
 
 ## Keeping the index in sync
 
-`sync()` reconciles each collection against its repo directory on every run, and is
-idempotent:
-
-- **stat fast path** — matching mtime+size, file is skipped without reading it
-- **content hash** — file touched but bytes unchanged, only the payload is refreshed
-- **changed** — old chunks deleted by `path` filter, then re-embedded and upserted
-- **deleted** — present in Qdrant but gone from disk, evicted
-- **repo removed** — its whole collection is dropped
+`sync()` reconciles each collection against its repo directory on every run and is
+idempotent, taking the cheapest route that is still correct: an unchanged stat skips the
+file unread, a matching content hash just refreshes the payload, and only genuinely new
+bytes are re-chunked and embedded. Deleted files are evicted; a removed repo drops its
+whole collection.
 
 `watch` runs the same reconcile, triggered by filesystem events with a 1s debounce so a
 `git checkout` or save-all collapses into one pass. Because it re-reconciles rather than
@@ -412,7 +395,8 @@ replaying individual events, nothing drifts if events are missed while it wasn't
 It re-discovers repos each pass, so cloning a new one creates its collection.
 
 File hash and vectors live in the **same Qdrant point payload**, so there's no second
-store to fall out of step.
+store to fall out of step. [docs/indexing.md](docs/indexing.md) covers the exclusive
+lock between `watch` and `index`, and why `watch` reports failures instead of raising.
 
 ## Demo script
 
@@ -430,6 +414,8 @@ store to fall out of step.
 `eval.jsonl` is 79 questions, each with the one file that should answer it, tagged by kind
 (conceptual / lexical / literal / mixed). `rag eval` reports how often that file lands in
 the top k, for dense, BM25 and hybrid, so a retrieval change can be judged instead of argued.
+[docs/retrieval.md](docs/retrieval.md) covers how the numbers below became the constants
+in `agent.py`.
 
 At k=8 on the current index:
 
@@ -457,8 +443,9 @@ and the split reads 0.85 human / 0.87 synthetic at k=8, so the residual easiness
 one question. Still compare synthetic against synthetic when it matters.
 
 Targets were also checked for byte-identical copies elsewhere in the corpus and dropped:
-a shared set of config-as-code templates is synced into every content repo, so a question about one is
-unscoreable when retrieval can legitimately return any of three copies.
+a shared set of config-as-code templates is synced into every content repo, so a
+question about one is unscoreable when retrieval can legitimately return any of three
+copies.
 
 ### Depth, and why `search` returns a digest tail
 
@@ -469,14 +456,14 @@ Recall keeps climbing well past where the results used to stop:
 | hybrid | 0.54 | 0.81 | 0.85 | 0.92 | **0.96** | 0.96 |
 
 The answer is nearly always retrieved — it just sat below the cut where nobody could see it.
-So `search` now returns full text for the top `k` and every remaining hit out to rank 50 as
-a one-line digest (`WIDE`, `FULL_CHARS`). Ranking is untouched; the caller gets the whole
-0.96 pool for about 4k extra characters and does its own judging.
+So `search` returns full text for the top `k` and every remaining hit out to rank 50 as a
+one-line digest (`WIDE`, `FULL_CHARS` in `agent.py`). Ranking is untouched; the caller
+gets the whole 0.96 pool for about 4k extra characters and does its own judging.
 
 The case that prompted it: *"I need temporary elevated access for an hour to debug a
 production issue"* returned ten near-identical config YAMLs, all matching on the bare
-token `access:`, while the one how-to page that explained the process sat at rank 37 — and the
-old `clip()` threw away everything past rank 10 before the agent ever saw it.
+token `access:`, while the one how-to page that explained the process sat at rank 37
+— and the old `clip()` threw away everything past rank 10 before the agent ever saw it.
 
 ### Judging with the local model: measured, and rejected
 
@@ -510,16 +497,15 @@ a new dependency or a second serving process.
 - Retrieval is hybrid: dense vectors fused with a BM25 sparse vector by reciprocal rank,
   BM25 weighted at `SPARSE_W` (0.2). Measured on `eval.jsonl`, not assumed — see below.
   No reranker: an LLM one was measured and made things worse, see above.
+  [docs/retrieval.md](docs/retrieval.md) explains why fusion happens in Python rather
+  than in Qdrant.
 - Loose files sitting directly in a root (e.g. `notes/Decision.md`) belong to no repo and
   are not indexed. Move them into a repo, or give them their own directory.
 - `watch` re-scans all roots on any event. ~4.5k files, so it's fast enough; scope the
   reconcile to changed paths if the corpus grows an order of magnitude.
-- Descriptions are generated from one doc per repo, plus the top-level and `docs/` listings.
-  The listings go *after* the document in the prompt, because a repo whose content lives in
-  `docs/` otherwise gets described by its CONTRIBUTING-style `AGENTS.md` — `platform-docs`
-  was catalogued as "guidelines for contributing" rather than the GCP platform docs, and the
-  `collections` tool is read straight by the calling agent. If a description still lies,
-  hand-edit `.rag.json`; `describe` only overwrites with `--force`.
+- Descriptions are generated from one doc per repo, plus the top-level and `docs/`
+  listings — the prompt ordering matters, see [docs/indexing.md](docs/indexing.md#descriptions).
+  If a description lies, hand-edit `.rag.json`; `describe` only overwrites with `--force`.
 - The graph is rebuilt only when you run `rag graph`; `watch` does not refresh it. It
   shifts slowly, so a weekly rebuild is enough.
 - `watch` reads the project list once at startup. Adding a project needs a restart
