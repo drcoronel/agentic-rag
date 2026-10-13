@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# RAG index + generated visualizations
+.rag.json
+.rag.json.lock
+graph.html
+topics.html
+
+# Local eval set (contains internal repo data)
+eval.jsonl
