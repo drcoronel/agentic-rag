@@ -3,7 +3,7 @@
 See docs/indexing.md for the project-overlap rule, the describe prompt ordering, and
 what the revision counter invalidates.
 """
-import fnmatch, json, re, sys
+import fnmatch, json, os, re, sys
 from pathlib import Path
 
 from .config import settings
@@ -57,7 +57,15 @@ def load_state():
 
 
 def save_state(st):
-    settings.state.write_text(json.dumps(st, indent=2, sort_keys=True))
+    """Write via a temp file and rename.
+
+    The flock keeps two writers apart but not a torn write: this file holds every
+    generated description plus both derived caches, and a crash mid-write would cost
+    an LLM pass over the whole corpus to rebuild.
+    """
+    tmp = settings.state.with_name(settings.state.name + ".tmp")
+    tmp.write_text(json.dumps(st, indent=2, sort_keys=True))
+    os.replace(tmp, settings.state)
 
 
 def context(project=None, args_roots=None, include=None):

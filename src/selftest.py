@@ -13,15 +13,37 @@ from .agent import search_hits, t_search
 from .graph import (build_graph, collection_graph, draw_graph, graph_mermaid, tg_to_json,
                     topic_graph, topics)
 from .qdrant import client, ensure, is_hybrid
-from .sensitive import is_secret, scan
+from .sensitive import is_secret, scan, secret_in
 from .state import (cache_key, cached, discover, load_state, rediscover, save_state, scope,
                     slug)
 from .sync import doctor, forget, sync
 from .text import chunk, sparse, tokens
 
 
-def selftest():
-    """Pure checks, then the store-backed ones under a throwaway collection prefix."""
+def selftest(offline=False):
+    """The pure checks, then the store-backed ones under a throwaway collection prefix.
+
+    `offline` stops after the pure half, which needs neither Qdrant nor Ollama and so
+    can run in CI or a pre-commit hook.
+    """
+    _selftest_pure()
+    if offline:
+        print("selftest ok (offline: chunking, tokenizer, bm25, secret guards)")
+        return
+    settings.prefix = "selftest" + uuid.uuid4().hex[:6] + "-"
+    try:
+        _selftest_store()
+    finally:
+        # Sweeping the prefix cleans up whatever a failed assert skipped past. Keyed on
+        # the prefix, not the state file: an early failure means there is no state file.
+        for c in client().get_collections().collections:
+            if c.name.startswith(settings.prefix):
+                client().delete_collection(c.name)
+    print("selftest ok")
+
+
+def _selftest_pure():
+    """Everything that needs no running service."""
     text = "\n".join(f"line {i} " + "x" * 40 for i in range(100))
     cs = chunk(text)
     assert cs[0][0] == 1 and cs[-1][1] == 100, cs
@@ -43,16 +65,13 @@ def selftest():
               "sealedsecrets-create.md", "SECRETS_HANDLING.md"):
         assert not is_secret(f), f
 
-    settings.prefix = "selftest" + uuid.uuid4().hex[:6] + "-"
-    try:
-        _selftest_store()
-    finally:
-        # Sweeping the prefix cleans up whatever a failed assert skipped past. Keyed on
-        # the prefix, not the state file: an early failure means there is no state file.
-        for c in client().get_collections().collections:
-            if c.name.startswith(settings.prefix):
-                client().delete_collection(c.name)
-    print("selftest ok")
+    # content detection: catches key material whatever the file is called
+    assert secret_in("foo\n-----BEGIN RSA PRIVATE KEY-----\n") == "private key"
+    assert secret_in("aws_access_key_id = AKIAIOSFODNN7EXAMPLE") == "aws access key"
+    assert secret_in("token: ghp_" + "a" * 36) == "github token"
+    assert secret_in("AIza" + "b" * 35) == "google api key"
+    assert secret_in("nothing to see: password = changeme") is None, "no generic rules"
+    assert secret_in("# How to rotate an AKIA key safely") is None, "prose must survive"
 
 
 def _selftest_store():

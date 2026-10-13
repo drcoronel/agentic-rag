@@ -5,10 +5,13 @@ everywhere a file can reach the model — indexing, grep and read_file. It is de
 broad: a false positive costs one unsearchable file, a false negative embeds a
 credential into a store with no auth in front of it.
 
-It cannot read minds. It does not inspect contents, so a secret pasted into `notes.md`
-is still indexed. See docs/indexing.md.
+`secret_in()` is the second layer: vendor-shaped key material anywhere in a file's
+text keeps the whole file out, whatever it is called. Together they miss a hand-rolled
+secret in a conventionally-named file — this is a guardrail, not a scanner. See
+docs/indexing.md.
 """
 import fnmatch
+import re
 from pathlib import Path
 
 from .config import settings
@@ -28,11 +31,29 @@ def is_secret(name):
     return any(fnmatch.fnmatch(n, g) for g in settings.secret_globs)
 
 
+_PATTERNS = None
+
+
+def secret_in(text):
+    """The label of the first key-material pattern found in `text`, else None.
+
+    Never returns the match itself: the point is to report a file without copying its
+    secret into a log.
+    """
+    global _PATTERNS
+    if _PATTERNS is None:
+        _PATTERNS = [(k, re.compile(v)) for k, v in settings.secret_patterns.items()]
+    return next((label for label, rx in _PATTERNS if rx.search(text)), None)
+
+
 def scan(ctx, project=None):
     """Points already in the index whose file looks sensitive.
 
-    Returns {collection: {path: chunks}}. Reads only the `path` payload, so this is one
-    cheap scroll per collection rather than a re-read of the corpus.
+    Checks both layers against what is stored: the filename, and the chunk text that
+    is already in the payload — so this also catches files indexed before either guard
+    existed, without re-reading the corpus.
+
+    Returns {collection: {path: (chunks, reason)}}, one scroll per collection.
     """
     found = {}
     for name in scope(ctx, project=project):
@@ -40,11 +61,14 @@ def scan(ctx, project=None):
         offset = None
         while True:
             points, offset = client().scroll(name, limit=4096, offset=offset,
-                                             with_payload=["path"], with_vectors=False)
+                                             with_payload=["path", "text"], with_vectors=False)
             for p in points:
                 path = p.payload["path"]
-                if is_secret(path):
-                    hits[path] = hits.get(path, 0) + 1
+                why = ("filename" if is_secret(path)
+                       else secret_in(p.payload.get("text", "")))
+                if why:
+                    n, prev = hits.get(path, (0, why))
+                    hits[path] = (n + 1, prev)
             if offset is None:
                 break
         if hits:
@@ -56,9 +80,9 @@ def purge(found, quiet=False):
     """Delete every point in `found` from Qdrant. Returns the chunk count removed."""
     gone = 0
     for name, hits in found.items():
-        for path, n in hits.items():
+        for path, (n, why) in hits.items():
             client().delete(name, points_selector=by_path(path))
             gone += n
             if not quiet:
-                print(f"  purged {n} chunks: {path}")
+                print(f"  purged {n} chunks ({why}): {path}")
     return gone

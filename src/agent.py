@@ -145,16 +145,22 @@ def t_grep(ctx, pattern, collection=None):
 def t_read_file(ctx, path, start=1, end=400):
     """A repo-relative file, or a line range of one, with line numbers.
 
-    Refuses files the secret denylist covers: this tool takes an arbitrary path, so it
-    would otherwise read straight past the index guard.
+    Takes an arbitrary path, so it enforces both guards itself: the secret denylist by
+    name, and containment within the indexed roots. Without the second check an
+    absolute path reads any file on the machine, and a symlink out of a root does the
+    same — `resolve()` is what closes both.
     """
     if is_secret(path):
         return f"refused: {Path(path).name} looks like it holds credentials"
     cands = [Path(path)] + [Path(p).parent / path for p in ctx["repos"].values()] \
             + [Path(r) / path for r in ctx["roots"]]
+    bases = {Path(r).resolve() for r in ctx["roots"]}
+    bases |= {Path(d).parent.resolve() for d in ctx["repos"].values()}
     f = next((c for c in cands if c.is_file()), None)
     if f is None:
         return f"not found: {path}"
+    if not any(f.resolve() == b or b in f.resolve().parents for b in bases):
+        return f"refused: {path} is outside the indexed roots"
     lines = f.read_text(errors="replace").splitlines()
     start, end = max(1, int(start)), min(len(lines), int(end))
     body = "\n".join(f"{i:>5}  {lines[i - 1]}" for i in range(start, end + 1))

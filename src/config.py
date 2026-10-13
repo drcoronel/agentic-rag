@@ -87,6 +87,30 @@ class Settings(BaseSettings):
     (`.env`, `*.key`, `.netrc`) cannot be prose, so they are unaffected."""
     doc_files: tuple[str, ...] = ("AGENTS.md", "CLAUDE.md", "README.md")
 
+    secret_patterns: dict[str, str] = {
+        "private key":       r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        "aws access key":    r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
+        "github token":      r"\bgh[pousr]_[A-Za-z0-9]{36}\b|\bgithub_pat_[A-Za-z0-9_]{60,}\b",
+        "gitlab token":      r"\bglpat-[A-Za-z0-9_-]{20}\b",
+        "slack token":       r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
+        "google api key":    r"\bAIza[0-9A-Za-z_-]{35}\b",
+        "openai key":        r"\bsk-[A-Za-z0-9]{32,}\b",
+        "anthropic key":     r"\bsk-ant-[A-Za-z0-9_-]{20,}\b",
+        "npm token":         r"\bnpm_[A-Za-z0-9]{36}\b",
+        "pypi token":        r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{20,}\b",
+        "json web token":    r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+    }
+    """Content patterns that keep a whole file out of the index, label -> regex.
+
+    Deliberately only vendor-shaped key material, which is close to zero false
+    positives. A generic `password: "..."` rule was left out: it fires on every
+    placeholder in every how-to, and a skipped doc is a silent hole in the index."""
+
+    tracked_only: bool = False
+    """Index only files `git ls-files` reports. Inherits the repo's own .gitignore,
+    which is the strongest available signal for "this was never meant to be read".
+    Non-git directories are indexed in full regardless."""
+
     max_bytes: int = 200_000
     chunk_chars: int = 1200
     overlap_lines: int = 2

@@ -206,8 +206,16 @@ uv run rag secrets            # what the index already holds that matches
 uv run rag secrets --purge    # drop those chunks now
 ```
 
-It is a filename denylist, not a secret scanner: a token pasted into `notes.md` is
-still indexed. See [docs/indexing.md](docs/indexing.md#the-secret-guardrail).
+A second layer scans *contents* for vendor-shaped key material (PEM keys, `AKIA…`,
+`ghp_…`, `AIza…`, JWTs) and keeps the whole file out whatever it is called. Set
+`RAG_TRACKED_ONLY=1` to go further and index only what `git ls-files` reports, which
+inherits each repo's `.gitignore`.
+
+It is still a guardrail, not a scanner: `DB_PASS: hunter2` in `config.yaml` matches
+nothing. See [docs/indexing.md](docs/indexing.md#the-secret-guardrail).
+
+Qdrant binds `127.0.0.1` in `compose.yaml` and has no auth — do not change that to
+`0.0.0.0` on a shared network.
 
 ### Removing things from the index
 

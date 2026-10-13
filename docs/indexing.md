@@ -64,7 +64,23 @@ allowlist, at all three places a file can reach the model:
 Grep and read_file need their own guard because they go to the filesystem directly and
 never consult the index.
 
-The list is deliberately broad. A false positive costs one unsearchable file; a false
+### Two layers
+
+`is_secret()` matches the filename. `secret_in()` matches the *contents*: vendor-shaped
+key material (PEM private keys, `AKIA…`, `ghp_…`, `AIza…`, JWTs) keeps the whole file
+out whatever it is called, checked in `sync_repo` right after the file is read and
+before it is chunked. A file rejected that way is also left out of `on_disk`, so a copy
+indexed before the check existed gets pruned on the same pass.
+
+The content rules are only vendor formats. A generic `password: "..."` rule was left
+out on purpose: it fires on every placeholder in every how-to, and a skipped document
+is a silent hole in the index that nobody notices.
+
+With `settings.tracked_only`, `walk()` narrows again to what `git ls-files` reports.
+That inherits the repository's own `.gitignore`, which is a better statement of "never
+meant to be read" than any denylist written here. Non-git directories are unaffected.
+
+The filename list is deliberately broad. A false positive costs one unsearchable file; a false
 negative embeds a credential. `secret_allow` is checked first so committed placeholders
 (`.env.example`, `*.template`) stay indexable, and so does prose — `*.md`, `*.mdx`,
 `*.rst`, `*.txt` are exempt because the name hints (`*secret*`, `*credential*`) are
@@ -76,9 +92,9 @@ into a Markdown file was never going to be caught either way. The hard patterns
 `.secrets`, `.ssh` and `.gnupg` are in `skip_dirs`, so those directories are not walked
 at all.
 
-**What this does not do.** It never looks at file *contents*. A token pasted into
-`notes.md`, or a repo that keeps credentials in a conventionally-named config file, is
-still indexed. This is a guardrail against the routine cases, not a secret scanner.
+**What this does not do.** A hand-rolled secret with no recognisable shape, sitting in
+a conventionally-named file, is still indexed — `DB_PASS: hunter2` in `config.yaml`
+matches no pattern. This is a guardrail against the routine cases, not a scanner.
 
 ### Finding what is already indexed
 
@@ -183,3 +199,24 @@ still answering. Hence `_try_sync()`: failures are reported and retried every
 After a burst of events (a git checkout, a save-all) the watcher waits a second for
 things to settle, then re-runs discovery before syncing, since a repo may have been
 cloned or removed rather than merely edited.
+
+## Other hardening
+
+- **Qdrant binds loopback.** `compose.yaml` maps `127.0.0.1:6333:6333`, not `6333:6333`.
+  The default Docker form binds `0.0.0.0`, and Qdrant has no auth, so on any shared
+  network every chunk of every indexed repo was readable by anyone who could route to
+  the machine. Running "only locally" does not help when the listener is not local.
+
+- **`read_file` is confined to the roots.** It accepts an arbitrary path, so it resolves
+  the candidate and requires it under an indexed root. `resolve()` closes both the
+  absolute-path case (`/etc/hosts`) and a symlink pointing out of a root. Only
+  `collections` and `search` are exposed over MCP today, but that is one config change
+  away from being remote.
+
+- **`save_state` writes atomically**, via a temp file and `os.replace`. The flock keeps
+  two writers apart but not a torn one, and that file holds every generated description
+  plus both derived caches — a truncated write costs an LLM pass over the whole corpus.
+
+- **`rag selftest --offline`** runs the half that needs no services: chunking, the
+  tokenizer, BM25 saturation, and both secret guards. Suitable for CI or a pre-commit
+  hook.

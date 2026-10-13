@@ -234,13 +234,13 @@ def secrets(
         print("no indexed file matches the secret denylist")
         raise typer.Exit(0)
 
-    chunks = sum(n for hits in found.values() for n in hits.values())
+    chunks = sum(n for hits in found.values() for n, _ in hits.values())
     files = sum(len(h) for h in found.values())
     print(f"{files} file(s), {chunks} chunk(s) in the index look sensitive:\n")
     for name, hits in sorted(found.items()):
         print(f"{name}:")
-        for path, n in sorted(hits.items()):
-            print(f"    {path}  ({n} chunks)")
+        for path, (n, why) in sorted(hits.items()):
+            print(f"    {path}  ({n} chunks, {why})")
     if purge_them:
         print()
         gone = purge(found)
@@ -252,9 +252,10 @@ def secrets(
 
 
 @app.command()
-def selftest():
-    """Run the end-to-end self check. Needs Qdrant and Ollama up."""
-    run_selftest()
+def selftest(offline: Annotated[bool, typer.Option(
+        "--offline", help="Only the checks that need no running service.")] = False):
+    """Run the self check. Needs Qdrant and Ollama up unless --offline."""
+    run_selftest(offline)
 
 
 def main():

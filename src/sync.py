@@ -3,7 +3,7 @@
 See docs/indexing.md for the three-tier change detection, the exclusive lock, the
 revision counter, and why watch never raises.
 """
-import contextlib, fcntl, hashlib, os, sys, threading, time, uuid
+import contextlib, fcntl, hashlib, os, subprocess, sys, threading, time, uuid
 from collections import Counter
 from pathlib import Path
 
@@ -12,10 +12,23 @@ from qdrant_client import models as qm
 from .config import settings
 from .llm import embed
 from .qdrant import by_path, client, ensure, indexed_files, is_hybrid
-from .sensitive import is_secret
+from .sensitive import is_secret, secret_in
 from .state import (cache_key, describe, discover, drop_caches, load_state, rediscover,
                     save_state)
 from .text import chunk, sparse
+
+
+def _tracked(repo_dir):
+    """Absolute paths git knows about, or None when this is not a git repo.
+
+    `git ls-files` already applies .gitignore, which is a better statement of "never
+    meant to be read" than any denylist written here.
+    """
+    r = subprocess.run(["git", "-C", repo_dir, "ls-files", "-z"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    return {os.path.join(repo_dir, x) for x in r.stdout.split("\0") if x}
 
 
 def walk(repo_dir):
@@ -23,8 +36,10 @@ def walk(repo_dir):
 
     Matched on suffix or on exact name, since Makefile and friends carry no suffix.
     The secret denylist is checked first and overrides both, so a `.tfvars` never
-    reaches the embedder no matter what the allowlist says.
+    reaches the embedder no matter what the allowlist says. With `settings.tracked_only`
+    the set is narrowed again to whatever git reports.
     """
+    tracked = _tracked(repo_dir) if settings.tracked_only else None
     for dirpath, dirnames, filenames in os.walk(repo_dir):
         dirnames[:] = [d for d in dirnames if d not in settings.skip_dirs]
         for fn in filenames:
@@ -33,6 +48,8 @@ def walk(repo_dir):
             if Path(fn).suffix.lower() not in settings.text_ext and fn not in settings.text_names:
                 continue
             p = os.path.join(dirpath, fn)
+            if tracked is not None and p not in tracked:
+                continue
             try:
                 st = os.stat(p)
             except OSError:
@@ -54,16 +71,22 @@ def sync_repo(name, repo_dir, quiet=False):
     on_disk, changed, touched = set(), [], []
 
     for p, st in walk(repo_dir):
-        on_disk.add(p)
         prev = known.get(p)
         if prev and prev[1] == st.st_mtime and prev[2] == st.st_size:
+            on_disk.add(p)
             continue
         data = Path(p).read_bytes()
+        text = data.decode("utf-8", "replace")
+        if (why := secret_in(text)):
+            # Left out of on_disk, so a copy indexed before this check is pruned below.
+            print(f"  {name}: skipped {os.path.relpath(p, repo_dir)} ({why})", file=sys.stderr)
+            continue
+        on_disk.add(p)
         h = hashlib.sha256(data).hexdigest()
         if prev and prev[0] == h:
             touched.append((p, st))
         else:
-            changed.append((p, st, h, data.decode("utf-8", "replace")))
+            changed.append((p, st, h, text))
 
     gone = set(known) - on_disk
     for p in gone:
