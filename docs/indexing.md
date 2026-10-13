@@ -46,71 +46,16 @@ dropping a collection is cheap and always the right answer to a schema mismatch.
 
 ## The secret guardrail
 
-Indexing was a pure allowlist: a file was taken if its extension was in `text_ext` or
-its name in `text_names`. That meant `.env` and `private.key` were skipped only
-incidentally — nothing checked for secrets — while `terraform.tfvars`,
-`secrets.yaml`, `service-account.json` and `.npmrc` were indexed like any other file,
-with their full text stored in the chunk payload of a Qdrant that has no auth.
+`walk()` checks `sensitive.is_secret(name)` before the extension allowlist, and
+`sync_repo()` checks `sensitive.secret_in(text)` after reading the file and before
+chunking it. A file rejected on contents is deliberately left out of `on_disk`, so a
+copy indexed before the check existed is pruned on the same pass rather than lingering.
 
-`sensitive.is_secret()` is now a denylist over the filename, checked **before** the
-allowlist, at all three places a file can reach the model:
+With `settings.tracked_only`, `walk()` narrows again to what `git ls-files` reports;
+non-git directories are unaffected.
 
-| path | guard |
-|---|---|
-| `sync.walk()` | the file is never read, so it is never chunked or embedded |
-| `agent.t_grep()` | matching lines are dropped, with a count of what was withheld |
-| `agent.t_read_file()` | refuses by name, since it takes an arbitrary path |
-
-Grep and read_file need their own guard because they go to the filesystem directly and
-never consult the index.
-
-### Two layers
-
-`is_secret()` matches the filename. `secret_in()` matches the *contents*: vendor-shaped
-key material (PEM private keys, `AKIA…`, `ghp_…`, `AIza…`, JWTs) keeps the whole file
-out whatever it is called, checked in `sync_repo` right after the file is read and
-before it is chunked. A file rejected that way is also left out of `on_disk`, so a copy
-indexed before the check existed gets pruned on the same pass.
-
-The content rules are only vendor formats. A generic `password: "..."` rule was left
-out on purpose: it fires on every placeholder in every how-to, and a skipped document
-is a silent hole in the index that nobody notices.
-
-With `settings.tracked_only`, `walk()` narrows again to what `git ls-files` reports.
-That inherits the repository's own `.gitignore`, which is a better statement of "never
-meant to be read" than any denylist written here. Non-git directories are unaffected.
-
-The filename list is deliberately broad. A false positive costs one unsearchable file; a false
-negative embeds a credential. `secret_allow` is checked first so committed placeholders
-(`.env.example`, `*.template`) stay indexable, and so does prose — `*.md`, `*.mdx`,
-`*.rst`, `*.txt` are exempt because the name hints (`*secret*`, `*credential*`) are
-what catch documentation *about* credentials, like a `sealedsecrets-create.md` how-to.
-Nothing is lost by that exemption: detection is filename-only, so a credential pasted
-into a Markdown file was never going to be caught either way. The hard patterns
-(`.env`, `*.key`, `.netrc`) cannot be prose, so they are unaffected.
-
-`.secrets`, `.ssh` and `.gnupg` are in `skip_dirs`, so those directories are not walked
-at all.
-
-**What this does not do.** A hand-rolled secret with no recognisable shape, sitting in
-a conventionally-named file, is still indexed — `DB_PASS: hunter2` in `config.yaml`
-matches no pattern. This is a guardrail against the routine cases, not a scanner.
-
-### Finding what is already indexed
-
-The denylist only applies going forward. `rag secrets` scrolls the `path` payload of
-every collection and reports what is already stored:
-
-```bash
-uv run rag secrets            # report; exits 1 if anything matches
-uv run rag secrets --purge    # delete those points now
-```
-
-A plain `rag index` also evicts them, because a denied file stops appearing in `walk()`
-and `sync` prunes whatever it can no longer see — `--purge` just does it immediately.
-
-Purging removes the copy in Qdrant. It does not un-disclose anything that was already
-embedded, so rotate whatever was found.
+The patterns, the enforcement points outside indexing, the tuning rationale and
+`rag secrets` are all in [security.md](security.md).
 
 ## Repository discovery
 
@@ -199,24 +144,3 @@ still answering. Hence `_try_sync()`: failures are reported and retried every
 After a burst of events (a git checkout, a save-all) the watcher waits a second for
 things to settle, then re-runs discovery before syncing, since a repo may have been
 cloned or removed rather than merely edited.
-
-## Other hardening
-
-- **Qdrant binds loopback.** `compose.yaml` maps `127.0.0.1:6333:6333`, not `6333:6333`.
-  The default Docker form binds `0.0.0.0`, and Qdrant has no auth, so on any shared
-  network every chunk of every indexed repo was readable by anyone who could route to
-  the machine. Running "only locally" does not help when the listener is not local.
-
-- **`read_file` is confined to the roots.** It accepts an arbitrary path, so it resolves
-  the candidate and requires it under an indexed root. `resolve()` closes both the
-  absolute-path case (`/etc/hosts`) and a symlink pointing out of a root. Only
-  `collections` and `search` are exposed over MCP today, but that is one config change
-  away from being remote.
-
-- **`save_state` writes atomically**, via a temp file and `os.replace`. The flock keeps
-  two writers apart but not a torn one, and that file holds every generated description
-  plus both derived caches — a truncated write costs an LLM pass over the whole corpus.
-
-- **`rag selftest --offline`** runs the half that needs no services: chunking, the
-  tokenizer, BM25 saturation, and both secret guards. Suitable for CI or a pre-commit
-  hook.

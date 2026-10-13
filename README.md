@@ -8,6 +8,7 @@ implementation rationale — why each knob is set where it is — lives next to 
 
 | | |
 |---|---|
+| [docs/security.md](docs/security.md) | **where your data goes, the secret guardrail, network exposure, operator checklist** |
 | [docs/indexing.md](docs/indexing.md) | settings, discovery, sync, locking, cache invalidation, `doctor`, watch failure modes |
 | [docs/retrieval.md](docs/retrieval.md) | the hand-rolled BM25, RRF fusion, the digest tail, error handling |
 | [docs/topology.md](docs/topology.md) | the two graph signals, topic clustering, the prunings, offline drawing |
@@ -35,6 +36,15 @@ a URL it reads from the environment:
 | `QDRANT_API_KEY` | unset (local Qdrant has no auth) | the cluster key |
 | `RAG_VERTEX_EMBED` | unset → Ollama | `projects/<id>/locations/<region>/publishers/google/models/text-embedding-005` |
 | `RAG_EMBED_DIM` | `768` | whatever the model emits |
+
+Other settings worth knowing, all fields on the pydantic `BaseSettings` in
+`src/config.py`:
+
+| var | default | effect |
+|---|---|---|
+| `RAG_TRACKED_ONLY` | `0` | index only files `git ls-files` reports, inheriting `.gitignore` |
+| `RAG_PREFIX` | unset | namespace the collections; the selftest uses it to stay out of your index |
+| `RAG_CHAT_MODEL` | `qwen2.5:14b` | the model behind `ask` and the generated descriptions |
 
 With `RAG_VERTEX_EMBED` set, `embed()` calls Vertex instead of Ollama and authenticates
 from the Cloud Run metadata server (locally: `GOOGLE_ACCESS_TOKEN`, else `gcloud auth
@@ -193,30 +203,6 @@ projects, and a stale topology graph. Each finding prints the command that fixes
 dead state entries, and clearing orphans. Everything it deletes is reindexable from disk.
 It will not reindex, redescribe or rebuild the graph for you, because those cost real time.
 
-### Secrets
-
-Files that look like they carry credentials are never indexed, grepped or read — the
-denylist in `settings.secret_globs` is checked before the extension allowlist, at all
-three places a file can reach the model. `.env`, `*.key`, `*.tfvars`, `.npmrc`,
-`service-account*.json` and friends are out; `.env.example`, `*.template` and prose
-stay in.
-
-```bash
-uv run rag secrets            # what the index already holds that matches
-uv run rag secrets --purge    # drop those chunks now
-```
-
-A second layer scans *contents* for vendor-shaped key material (PEM keys, `AKIA…`,
-`ghp_…`, `AIza…`, JWTs) and keeps the whole file out whatever it is called. Set
-`RAG_TRACKED_ONLY=1` to go further and index only what `git ls-files` reports, which
-inherits each repo's `.gitignore`.
-
-It is still a guardrail, not a scanner: `DB_PASS: hunter2` in `config.yaml` matches
-nothing. See [docs/indexing.md](docs/indexing.md#the-secret-guardrail).
-
-Qdrant binds `127.0.0.1` in `compose.yaml` and has no auth — do not change that to
-`0.0.0.0` on a shared network.
-
 ### Removing things from the index
 
 Three units, and only the last one needs a command:
@@ -253,6 +239,40 @@ it by re-indexing under the name you want.
 One sharp edge: collection names come from the directory name, so two projects with a repo
 directory of the same name collide on one collection. There is a `ponytail:` note at the
 collision point; namespace the slug per project if it ever bites.
+
+## Security
+
+It indexes whatever you point it at and makes it searchable by a language model, so the
+two risks are indexing something that should never be read, and exposing the index to
+something that should not reach it. Both are covered in
+**[docs/security.md](docs/security.md)**; the short version:
+
+**Secrets are blocked by name and by content.** `settings.secret_globs` rejects `.env`,
+`*.key`, `*.tfvars`, `.npmrc`, `service-account*.json` and friends before the extension
+allowlist; `settings.secret_patterns` rejects any file containing vendor-shaped key
+material (PEM keys, `AKIA…`, `ghp_…`, `AIza…`, JWTs) whatever it is called. Both are
+enforced at indexing, in `grep`, and in `read_file`, because those are separate paths to
+the same data. `.env.example`, `*.template` and prose stay indexable.
+
+```bash
+uv run rag secrets            # what the index already holds that it should not
+uv run rag secrets --purge    # drop those chunks now
+```
+
+Set `RAG_TRACKED_ONLY=1` to go further and index only what `git ls-files` reports,
+inheriting each repo's `.gitignore`.
+
+**It is a guardrail, not a scanner.** `DB_PASS: hunter2` in `config.yaml` matches
+nothing and is indexed. Purging is also not rotation — anything found was stored in
+plaintext, so rotate it.
+
+**Qdrant has no auth,** so `compose.yaml` binds `127.0.0.1:6333`. The ordinary
+`6333:6333` form binds every interface and makes your whole corpus readable to the
+local network. `rag mcp --http` is loopback and unauthenticated for the same reason.
+
+**Know what leaves the machine.** Ollama and Qdrant are local, but `RAG_VERTEX_EMBED`
+POSTs every chunk to Google, and `rag mcp` hands chunk text to whatever model drives the
+tools. Shape 1 is the only configuration where nothing leaves.
 
 ## Topology
 
@@ -398,7 +418,9 @@ uv run rag topics --draw --open                       # topic clusters across re
 uv run rag search -c handbook "on-call rotation"      # raw retrieval, no LLM
 uv run rag mcp --http --watch                         # serve tools to Antigravity + stay synced
 uv run rag mcp                                        # same tools over stdio
+uv run rag secrets                                    # what the index holds that it should not
 uv run rag selftest                                   # sync correctness check
+uv run rag selftest --offline                         # ...the half needing no services
 uv run rag eval -k 8 --misses                         # retrieval quality on eval.jsonl
 ```
 

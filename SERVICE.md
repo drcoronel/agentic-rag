@@ -4,6 +4,9 @@ Shape 3 in the [README](README.md) assumes you start `rag mcp --http --watch` in
 terminal and leave it there. That works until you close the window or reboot — and when
 the server is gone, the `repo-rag` tools silently don't appear in Antigravity.
 
+The service runs unauthenticated on loopback and serves chunk text to whatever
+model calls it — see [docs/security.md](docs/security.md) before exposing it.
+
 This is the same thing under launchd instead: starts at login, restarts if it dies,
 survives reboots. Nothing new is installed — launchd is macOS's own service supervisor,
 the thing that already starts Docker and Ollama for you.
