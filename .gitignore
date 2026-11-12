@@ -12,6 +12,7 @@ wheels/
 # RAG index + generated visualizations
 .rag.json
 .rag.json.lock
+.rag-calls.jsonl
 graph.html
 topics.html
 

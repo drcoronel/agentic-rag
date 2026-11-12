@@ -123,14 +123,19 @@ Qdrant stores the **full text** of every chunk in the point payload, unencrypted
 index is a readable copy of your corpus, not just vectors. Anything that can read the
 Qdrant volume or reach its port has your repositories.
 
-Three files in the working directory also carry corpus content and are gitignored for
+Four files in the working directory also carry corpus content and are gitignored for
 that reason:
 
 | file | holds |
 |---|---|
 | `.rag.json` | absolute repo paths, and a generated description of each repository |
+| `.rag-calls.jsonl` | every MCP call: the agent's queries and the chunk text returned (mode 0600) |
 | `graph.html` | repository names and their cross-reference counts |
 | `topics.html` | topic labels mined from chunk text, plus per-repository breakdowns |
+
+With `MLFLOW_TRACKING_URI` set, the same call records (queries and returned chunk text)
+also go to that tracking server. Keep it on loopback, as `mlflow server` is by default;
+pointing it at a shared server publishes your corpus to whoever can read it.
 
 The two HTML pages are standalone and open with no network, which also makes them easy
 to send to someone by accident. They are derived from your corpus; treat them as such.

@@ -3,7 +3,7 @@
 Every collection it creates is namespaced under a throwaway `settings.prefix`, and the
 state file is redirected to a temporary directory, so a run can neither read nor damage the real index.
 """
-import uuid
+import json, tempfile, uuid
 from pathlib import Path
 
 from qdrant_client import models as qm
@@ -13,6 +13,7 @@ from .agent import search_hits, t_search
 from .graph import (build_graph, collection_graph, draw_graph, graph_mermaid, tg_to_json,
                     topic_graph, topics)
 from .qdrant import client, ensure, is_hybrid
+from .server import logged
 from .sensitive import is_secret, scan, secret_in
 from .state import (cache_key, cached, discover, load_state, rediscover, save_state, scope,
                     slug)
@@ -28,7 +29,7 @@ def selftest(offline=False):
     """
     _selftest_pure()
     if offline:
-        print("selftest ok (offline: chunking, tokenizer, bm25, secret guards)")
+        print("selftest ok (offline: chunking, tokenizer, bm25, secret guards, call log)")
         return
     settings.prefix = "selftest" + uuid.uuid4().hex[:6] + "-"
     try:
@@ -72,6 +73,29 @@ def _selftest_pure():
     assert secret_in("AIza" + "b" * 35) == "google api key"
     assert secret_in("nothing to see: password = changeme") is None, "no generic rules"
     assert secret_in("# How to rotate an AKIA key safely") is None, "prose must survive"
+
+    # the MCP call log: args with defaults, hits parsed in rank order, errors recorded
+    real = settings.calls_log
+    settings.calls_log = Path(tempfile.mkdtemp()) / "calls.jsonl"
+    try:
+        @logged
+        def search(query: str, k: int = 8) -> str:
+            if query == "boom":
+                raise ValueError("no")
+            return ("--- [repo-a] docs/x.md:10-20 (score 0.9)\ntext\n\n--- 1 more:\n"
+                    "[repo-b] y.py:3-9  digest")
+        search("hi")
+        try:
+            search("boom")
+        except ValueError:
+            pass
+        ok, bad = map(json.loads, settings.calls_log.read_text().splitlines())
+        assert ok["args"] == {"query": "hi", "k": 8}, ok
+        assert [(h["collection"], h["line"]) for h in ok["hits"]] == [("repo-a", 10), ("repo-b", 3)]
+        assert bad["error"] == "ValueError('no')" and bad["result"] is None, bad
+        assert settings.calls_log.stat().st_mode & 0o077 == 0, "log holds chunk text"
+    finally:
+        settings.calls_log = real
 
 
 def _selftest_store():
