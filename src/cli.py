@@ -217,6 +217,43 @@ def mcp(
 
 
 @app.command()
+def calls(
+    last: Annotated[int, typer.Option("-n", "--last", help="How many recent calls to list.")] = 20,
+    hits: Annotated[int, typer.Option("--hits", help="Top hits shown per search.")] = 3,
+):
+    """What the MCP tools were asked, when, how fast, and what they returned.
+
+    Reads the call log the MCP server writes. The full results are in the file itself
+    (one JSON object per line) for anything this summary does not show.
+    """
+    import json
+    from collections import Counter
+    from statistics import median
+    from .config import settings
+
+    if not settings.calls_log.exists():
+        print(f"no calls logged yet ({settings.calls_log})")
+        raise typer.Exit(0)
+    recs = [json.loads(l) for l in settings.calls_log.read_text().splitlines() if l.strip()]
+    for r in recs[-last:]:
+        args = {k: v for k, v in r["args"].items() if v is not None}
+        print(f"{r['ts'][:19]}  {r['tool']:<11} {r['ms']:>7.0f}ms  {json.dumps(args)}"
+              + (f"  ERROR {r['error']}" if r["error"] else ""))
+        for h in r["hits"][:hits]:
+            print(f"{'':34}-> [{h['collection']}] {h['path']}:{h['line']}")
+
+    print(f"\n{len(recs)} calls total")
+    for tool in sorted({r["tool"] for r in recs}):
+        ms = [r["ms"] for r in recs if r["tool"] == tool]
+        print(f"  {tool:<11} {len(ms):>5} calls, median {median(ms):.0f}ms, max {max(ms):.0f}ms")
+    top = Counter(r["hits"][0]["collection"] for r in recs if r["hits"])
+    empty = sum(1 for r in recs if r["tool"] == "search" and not r["hits"])
+    print("  rank-1 hit by collection: "
+          + ", ".join(f"{c} {n}" for c, n in top.most_common(10))
+          + (f"; {empty} searches returned nothing" if empty else ""))
+
+
+@app.command()
 def secrets(
     project: Project = None,
     purge_them: Annotated[bool, typer.Option(

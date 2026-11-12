@@ -62,6 +62,22 @@ itself. `search` deliberately returns more than it ranks confidently: full text 
 best hits, then every remaining candidate as a path-only digest, because the harness is a
 better relevance judge than anything that runs locally (measured, see *Retrieval quality*).
 
+Every tool call is appended to `.rag-calls.jsonl`: timestamp, tool, arguments, latency,
+the cited hits in rank order, and the full result. `uv run rag calls` lists the recent
+ones and summarises latency per tool and which repos win rank 1; the file has the rest.
+
+For a UI, point the server at MLflow and every call also becomes a trace (experiment
+`repo-rag`, tagged `tool`, `rank1`, `collections_hit`, so `tags.rank1 = 'my-repo'`
+filters by the repo that answered):
+
+```bash
+docker compose up -d mlflow                             # UI at http://127.0.0.1:5001
+MLFLOW_TRACKING_URI=http://127.0.0.1:5001 uv run rag mcp --http --watch
+```
+
+For a stdio server, put `MLFLOW_TRACKING_URI` in the harness's `env` for it. If the
+tracking server is down, tracing turns itself off with a warning and the tools carry on.
+
 ### Shape 3 setup (local index + Antigravity)
 
 Start the server — one process serves the tools *and* keeps the index synced:
@@ -393,7 +409,7 @@ so the demo shows the reasoning path, not just the answer.
 ## Setup
 
 ```bash
-docker compose up -d                     # Qdrant on :6333
+docker compose up -d                     # Qdrant on :6333, MLflow UI on :5001
 ollama pull embeddinggemma:300m          # embeddings, 768-dim
 ollama pull qwen2.5:14b                  # reasoning + tool calling
 ```
@@ -418,6 +434,7 @@ uv run rag topics --draw --open                       # topic clusters across re
 uv run rag search -c handbook "on-call rotation"      # raw retrieval, no LLM
 uv run rag mcp --http --watch                         # serve tools to Antigravity + stay synced
 uv run rag mcp                                        # same tools over stdio
+uv run rag calls                                      # what the agent asked the MCP, and got
 uv run rag secrets                                    # what the index holds that it should not
 uv run rag selftest                                   # sync correctness check
 uv run rag selftest --offline                         # ...the half needing no services

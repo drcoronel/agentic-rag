@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     """Collection namespace. The selftest overrides it so its collections are its own."""
 
     state: Path = _ROOT / ".rag.json"
+    calls_log: Path = _ROOT / ".rag-calls.jsonl"
+    """Every MCP tool call, one JSON line each. See `rag calls`."""
+    mlflow_uri: str = Field("", validation_alias="MLFLOW_TRACKING_URI")
+    """MLflow tracking server for MCP call traces. Empty leaves tracing off."""
+    mlflow_experiment: str = "repo-rag"
 
     doc_prefix: str = "title: none | text: "
     query_prefix: str = "task: search result | query: "

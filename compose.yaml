@@ -5,5 +5,17 @@ services:
     volumes: ["qdrant_storage:/qdrant/storage"]
     restart: unless-stopped
 
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.18.0   # match the mlflow-tracing client in uv.lock
+    command: mlflow server                 # the image's default is a bare python3
+    environment:
+      MLFLOW_HOST: 0.0.0.0                 # in the container only; the port map keeps it on loopback
+      MLFLOW_BACKEND_STORE_URI: sqlite:////mlflow/mlflow.db
+      MLFLOW_ARTIFACTS_DESTINATION: /mlflow/artifacts
+    ports: ["127.0.0.1:5001:5000"]   # loopback only: no auth, traces hold chunk text
+    volumes: ["mlflow_data:/mlflow"]
+    restart: unless-stopped
+
 volumes:
   qdrant_storage:
+  mlflow_data:
